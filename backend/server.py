@@ -38,7 +38,7 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 # Choose which AI provider to use
-# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_gemini', 'local_gemini_consensus'
+# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_embedding', 'local_gemini', 'local_gemini_consensus'
 AI_PROVIDER = os.environ.get('AI_PROVIDER', 'gemini')
 AI_MODEL = os.environ.get('AI_MODEL', 'gemini-2.0-flash')  # Model name
 LOCAL_MODEL_PATH = Path(os.environ.get('LOCAL_MODEL_PATH', ROOT_DIR / "models" / "local_model.onnx"))
@@ -52,6 +52,16 @@ REFERENCE_MAX_IMAGES = int(os.environ.get('REFERENCE_MAX_IMAGES', '2'))
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'dense_v1')
 API_KEY = os.environ.get('API_KEY', '').strip()
 ALLOWED_IMAGE_DIR = Path(os.environ.get('ALLOWED_IMAGE_DIR', ROOT_DIR / "incoming")).resolve()
+EMBEDDING_STORE_DIR = Path(os.environ.get('EMBEDDING_STORE_DIR', ROOT_DIR / "embedding_store")).resolve()
+EMBEDDING_MODEL_NAME = os.environ.get('EMBEDDING_MODEL_NAME', 'vit_large_patch14_dinov2.lvd142m')
+EMBEDDING_MODEL_WEIGHTS = os.environ.get('EMBEDDING_MODEL_WEIGHTS', '').strip()
+EMBEDDING_IMAGE_SIZE = int(os.environ.get('EMBEDDING_IMAGE_SIZE', '518'))
+EMBEDDING_SCALE_SIZE = int(os.environ.get('EMBEDDING_SCALE_SIZE', '576'))
+EMBEDDING_CROP_MODE = os.environ.get('EMBEDDING_CROP_MODE', 'edge5')
+EMBEDDING_TOP_K = int(os.environ.get('EMBEDDING_TOP_K', '3'))
+EMBEDDING_MIN_SIM = float(os.environ.get('EMBEDDING_MIN_SIM', '0.35'))
+EMBEDDING_MARGIN = float(os.environ.get('EMBEDDING_MARGIN', '0.05'))
+EMBEDDING_DEVICE = os.environ.get('EMBEDDING_DEVICE', '').strip()
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -118,6 +128,8 @@ LOCAL_MODEL_SPECS = {
     ),
 }
 LOCAL_MODEL_CACHE: dict[str, Tuple[ort.InferenceSession, str, List[dict]]] = {}
+EMBEDDING_ENGINE = None
+EMBEDDING_STORE = None
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -375,6 +387,72 @@ def load_local_model(model_key: str) -> Tuple[ort.InferenceSession, str, List[di
     )
     return session, input_name, labels, spec.image_size
 
+
+def _resolve_embedding_device() -> str:
+    if EMBEDDING_DEVICE:
+        return EMBEDDING_DEVICE
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def get_embedding_engine():
+    global EMBEDDING_ENGINE
+    if EMBEDDING_ENGINE is not None:
+        return EMBEDDING_ENGINE
+    from embedding_engine import EmbeddingConfig, EmbeddingEngine
+
+    weights_path = Path(EMBEDDING_MODEL_WEIGHTS) if EMBEDDING_MODEL_WEIGHTS else None
+    config = EmbeddingConfig(
+        model_name=EMBEDDING_MODEL_NAME,
+        weights_path=weights_path,
+        image_size=EMBEDDING_IMAGE_SIZE,
+        scale_size=EMBEDDING_SCALE_SIZE,
+        crop_mode=EMBEDDING_CROP_MODE,
+        device=_resolve_embedding_device(),
+    )
+    EMBEDDING_ENGINE = EmbeddingEngine(config)
+    return EMBEDDING_ENGINE
+
+
+def get_embedding_store():
+    global EMBEDDING_STORE
+    if EMBEDDING_STORE is not None:
+        return EMBEDDING_STORE
+    from embedding_store import EmbeddingStore
+
+    EMBEDDING_STORE = EmbeddingStore.load(EMBEDDING_STORE_DIR)
+    return EMBEDDING_STORE
+
+
+def decode_base64_to_pil(image_base64: str) -> Image.Image:
+    image_bytes = base64.b64decode(image_base64)
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return img
+
+
+async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) -> dict:
+    """Run local embedding similarity and return uniform result dict."""
+    engine = get_embedding_engine()
+    store = get_embedding_store()
+    img = decode_base64_to_pil(image_base64)
+    query_embeddings = await asyncio.to_thread(engine.extract_embeddings, img, True)
+    result = await asyncio.to_thread(
+        store.score_query,
+        query_embeddings,
+        plu_product.plu_code,
+        EMBEDDING_TOP_K,
+        EMBEDDING_MIN_SIM,
+        EMBEDDING_MARGIN,
+    )
+    return {
+        "analysis": result["analysis"],
+        "is_match": result["is_match"],
+        "confidence": result["confidence"],
+    }
 async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_key: str = "local") -> dict:
     """Run offline ONNX model and return uniform result dict."""
     session, input_name, labels, image_size = await asyncio.to_thread(load_local_model, model_key)
@@ -549,7 +627,11 @@ async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> d
         if provider == 'local_large':
             return await run_local_inference(image_base64, plu_product, model_key="local_large")
 
-        # 3) Local first (small), Gemini if mismatch
+        # 3) Local embedding store (offline similarity)
+        if provider == 'local_embedding':
+            return await run_embedding_inference(image_base64, plu_product)
+
+        # 4) Local first (small), Gemini if mismatch
         if provider == 'local_gemini':
             local_res = await run_local_inference(image_base64, plu_product, model_key="local")
             if local_res["is_match"]:
@@ -577,7 +659,7 @@ async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> d
                 "reference_count": gemini_res.get("reference_count"),
             }
 
-        # 4) Local + Gemini consensus (always run both)
+        # 5) Local + Gemini consensus (always run both)
         if provider == 'local_gemini_consensus':
             local_key = "local_large" if has_local_model("local_large") else "local"
             local_res = await run_local_inference(image_base64, plu_product, model_key=local_key)
@@ -599,7 +681,7 @@ async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> d
                 "reference_count": gemini_res.get("reference_count"),
             }
 
-        # 5) Remote single provider (gemini or openai)
+        # 6) Remote single provider (gemini or openai)
         return await run_remote_inference(provider, model_name, image_base64, plu_product)
 
     except Exception as e:
@@ -1035,12 +1117,20 @@ async def get_ai_config():
 @api_router.post("/system/ai-config")
 async def update_ai_config(config: AIConfigUpdate):
     global AI_PROVIDER, AI_MODEL
-    allowed = {"gemini", "openai", "local", "local_large", "local_gemini", "local_gemini_consensus"}
+    allowed = {
+        "gemini",
+        "openai",
+        "local",
+        "local_large",
+        "local_embedding",
+        "local_gemini",
+        "local_gemini_consensus",
+    }
     if config.provider not in allowed:
         raise HTTPException(status_code=400, detail=f"Provider must be one of {allowed}")
     AI_PROVIDER = config.provider
     # Normalize model choice based on provider
-    if AI_PROVIDER in {"local", "local_large"}:
+    if AI_PROVIDER in {"local", "local_large", "local_embedding"}:
         AI_MODEL = ""
     elif AI_PROVIDER in {"gemini", "local_gemini", "local_gemini_consensus"}:
         AI_MODEL = config.model if config.model is not None else "gemini-2.5-flash-lite"

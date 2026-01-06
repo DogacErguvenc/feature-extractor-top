@@ -70,8 +70,12 @@ function Setup-Env {
     $envPath = "backend/.env"
     $frontendEnvPath = "frontend/.env"
     $incomingDir = Join-Path $RepoRoot "backend\incoming"
+    $embeddingStoreDir = Join-Path $RepoRoot "backend\embedding_store"
     if (-not (Test-Path $incomingDir)) {
         New-Item -ItemType Directory -Force -Path $incomingDir | Out-Null
+    }
+    if (-not (Test-Path $embeddingStoreDir)) {
+        New-Item -ItemType Directory -Force -Path $embeddingStoreDir | Out-Null
     }
     if ((-not (Test-Path $envPath)) -or $ForceEnv) {
         $modelPath = Join-Path $RepoRoot "backend\models\local_model.onnx"
@@ -89,6 +93,16 @@ LOCAL_LARGE_MODEL_PATH=$largeModelPath
 LOCAL_LARGE_LABELS_PATH=$largeLabelsPath
 LOCAL_SMALL_IMAGE_SIZE=224
 LOCAL_LARGE_IMAGE_SIZE=300
+EMBEDDING_STORE_DIR=$embeddingStoreDir
+EMBEDDING_MODEL_NAME=vit_large_patch14_dinov2.lvd142m
+EMBEDDING_MODEL_WEIGHTS=
+EMBEDDING_IMAGE_SIZE=518
+EMBEDDING_SCALE_SIZE=576
+EMBEDDING_CROP_MODE=edge5
+EMBEDDING_TOP_K=3
+EMBEDDING_MIN_SIM=0.35
+EMBEDDING_MARGIN=0.05
+EMBEDDING_DEVICE=
 GOOGLE_API_KEY=
 OPENAI_API_KEY=
 API_KEY=$apiKey

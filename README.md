@@ -24,6 +24,7 @@ Model Seçimi
 ------------
 Dashboard → “Model Seçimi” kartı:
 - Local (ONNX, offline)
+- Local (Embedding, offline similarity)
 - Gemini (gemini-2.5-flash-lite / gemini-2.5-flash)
 - OpenAI (model adı serbest)
 Kaydedilen ayar MongoDB’de saklanır; sonraki çekimlerde aynı model kullanılır.
@@ -50,3 +51,8 @@ Security
 - API_KEY zorunlu; backend .env icine yazin.
 - Frontend .env icine REACT_APP_API_KEY olarak ekleyin.
 - Tum /api isteklerinde x-api-key header gonderilmelidir.
+
+Embedding Store
+---------------
+- Local (Embedding) icin once embedding store olusturun:
+  `python backend/build_embedding_store.py --data-dir C:\terazi-datasets\train --out-dir backend\embedding_store`
