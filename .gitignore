@@ -64,6 +64,13 @@ chainlit.md
 # Data and databases
 agenthub/agents/youtube/db
 
+# Embedding artifacts
+backend/embedding_store/
+backend/models/embedding_dino_ft/
+backend/models/*.pth
+backend/models/*.pt
+backend/models/*.safetensors
+
 # Archive files and large assets
 **/*.zip
 **/*.tar.gz

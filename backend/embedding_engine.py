@@ -27,17 +27,62 @@ class EmbeddingEngine:
         self.config = config
         self._model: Optional[torch.nn.Module] = None
 
+    @staticmethod
+    def _resize_pos_embed(
+        state: dict, model: torch.nn.Module
+    ) -> dict:
+        if "pos_embed" not in state or not hasattr(model, "pos_embed"):
+            return state
+
+        pos_embed = state["pos_embed"]
+        if pos_embed.shape == model.pos_embed.shape:
+            return state
+
+        num_prefix = getattr(model, "num_prefix_tokens", 1)
+        if num_prefix < 0:
+            num_prefix = 0
+
+        prefix = pos_embed[:, :num_prefix] if num_prefix else pos_embed[:, :0]
+        pos_tokens = pos_embed[:, num_prefix:]
+        if pos_tokens.ndim != 3:
+            return state
+
+        embed_dim = pos_tokens.shape[-1]
+        old_num = pos_tokens.shape[1]
+        new_num = model.pos_embed.shape[1] - num_prefix
+        old_size = int(round(old_num ** 0.5))
+        new_size = int(round(new_num ** 0.5))
+        if old_size * old_size != old_num or new_size * new_size != new_num:
+            return state
+
+        pos_tokens = pos_tokens.reshape(1, old_size, old_size, embed_dim).permute(0, 3, 1, 2)
+        pos_tokens = F.interpolate(
+            pos_tokens, size=(new_size, new_size), mode="bicubic", align_corners=False
+        )
+        pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(1, new_size * new_size, embed_dim)
+        state["pos_embed"] = torch.cat([prefix, pos_tokens], dim=1)
+        return state
+
     def _load_model(self) -> torch.nn.Module:
         if self._model is not None:
             return self._model
 
         pretrained = self.config.weights_path is None
-        model = timm.create_model(
-            self.config.model_name,
-            pretrained=pretrained,
-            num_classes=0,
-            global_pool="avg",
-        )
+        try:
+            model = timm.create_model(
+                self.config.model_name,
+                pretrained=pretrained,
+                num_classes=0,
+                global_pool="avg",
+                img_size=self.config.image_size,
+            )
+        except TypeError:
+            model = timm.create_model(
+                self.config.model_name,
+                pretrained=pretrained,
+                num_classes=0,
+                global_pool="avg",
+            )
 
         if self.config.weights_path:
             weights_path = self.config.weights_path
@@ -46,6 +91,8 @@ class EmbeddingEngine:
             state = torch.load(weights_path, map_location="cpu")
             if isinstance(state, dict) and "state_dict" in state:
                 state = state["state_dict"]
+            if isinstance(state, dict):
+                state = self._resize_pos_embed(state, model)
             model.load_state_dict(state, strict=False)
 
         device = torch.device(self.config.device)

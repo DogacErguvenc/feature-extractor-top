@@ -128,9 +128,18 @@ def main() -> int:
     )
 
     num_classes = len(train_ds.classes)
-    model = timm.create_model(
-        args.model_name, pretrained=True, num_classes=num_classes, global_pool="avg"
-    )
+    try:
+        model = timm.create_model(
+            args.model_name,
+            pretrained=True,
+            num_classes=num_classes,
+            global_pool="avg",
+            img_size=args.image_size,
+        )
+    except TypeError:
+        model = timm.create_model(
+            args.model_name, pretrained=True, num_classes=num_classes, global_pool="avg"
+        )
     if args.grad_checkpointing and hasattr(model, "set_grad_checkpointing"):
         model.set_grad_checkpointing(True)
     model = model.to(device)
