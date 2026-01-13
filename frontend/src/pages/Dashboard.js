@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import "./Dashboard.css";
 
 const IMAGE_PAGE_SIZE = 20;
+const VALIDATION_PAGE_SIZE = 20;
 
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
@@ -20,6 +21,8 @@ const Dashboard = () => {
   const [loadingImage, setLoadingImage] = useState(false);
   const [imagesPage, setImagesPage] = useState(1);
   const [imagesLoading, setImagesLoading] = useState(false);
+  const [validationsPage, setValidationsPage] = useState(1);
+  const [validationsLoading, setValidationsLoading] = useState(false);
   const [aiConfig, setAiConfig] = useState({ provider: "local", model: "", version: "" });
   const [savingAiConfig, setSavingAiConfig] = useState(false);
   const [health, setHealth] = useState(null);
@@ -44,6 +47,10 @@ const Dashboard = () => {
   }, [imagesPage]);
 
   useEffect(() => {
+    fetchValidationResults(validationsPage);
+  }, [validationsPage]);
+
+  useEffect(() => {
     if (!stats) {
       return;
     }
@@ -53,17 +60,25 @@ const Dashboard = () => {
     }
   }, [stats, imagesPage]);
 
+  useEffect(() => {
+    if (!stats) {
+      return;
+    }
+    const maxPage = Math.max(1, Math.ceil(stats.total_validations / VALIDATION_PAGE_SIZE));
+    if (validationsPage > maxPage) {
+      setValidationsPage(maxPage);
+    }
+  }, [stats, validationsPage]);
+
   const fetchDashboardData = async () => {
     try {
-      const [statsRes, validationRes, modeRes, aiRes] = await Promise.all([
+      const [statsRes, modeRes, aiRes] = await Promise.all([
         axios.get(`${API}/stats/dashboard`),
-        axios.get(`${API}/validation/results?limit=20`),
         axios.get(`${API}/system/mode`),
         axios.get(`${API}/system/ai-config`)
       ]);
 
       setStats(statsRes.data);
-      setValidationResults(validationRes.data);
       setSystemMode(modeRes.data.mode);
       setAiConfig(aiRes.data);
       setLoading(false);
@@ -87,6 +102,22 @@ const Dashboard = () => {
       toast.error("Fotograf listesi yuklenemedi");
     } finally {
       setImagesLoading(false);
+    }
+  };
+
+  const fetchValidationResults = async (page = 1) => {
+    setValidationsLoading(true);
+    try {
+      const skip = (page - 1) * VALIDATION_PAGE_SIZE;
+      const res = await axios.get(
+        `${API}/validation/results?limit=${VALIDATION_PAGE_SIZE}&skip=${skip}`
+      );
+      setValidationResults(res.data || []);
+    } catch (error) {
+      console.error("Error fetching validation results:", error);
+      toast.error("AI kontrol listesi yuklenemedi");
+    } finally {
+      setValidationsLoading(false);
     }
   };
 
@@ -165,6 +196,8 @@ const Dashboard = () => {
 
   const totalImages = stats?.total_images ?? 0;
   const imagesTotalPages = Math.max(1, Math.ceil(totalImages / IMAGE_PAGE_SIZE));
+  const totalValidations = stats?.total_validations ?? 0;
+  const validationsTotalPages = Math.max(1, Math.ceil(totalValidations / VALIDATION_PAGE_SIZE));
 
   if (loading) {
     return (
@@ -305,7 +338,7 @@ const Dashboard = () => {
       <Tabs defaultValue="images" className="data-tabs" data-testid="data-tabs">
         <TabsList>
           <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({totalImages || capturedImages.length})</TabsTrigger>
-          <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({validationResults.length})</TabsTrigger>
+          <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({totalValidations || validationResults.length})</TabsTrigger>
           <TabsTrigger value="plu-stats" data-testid="plu-stats-tab">PLU istatistikleri</TabsTrigger>
           <TabsTrigger value="health" data-testid="health-tab">Sistem Durumu</TabsTrigger>
         </TabsList>
@@ -349,7 +382,7 @@ const Dashboard = () => {
             )}
           </div>
           {capturedImages.length > 0 && (
-            <div className="images-pagination">
+            <div className="data-pagination">
               <Button
                 variant="outline"
                 onClick={() => setImagesPage((page) => Math.max(1, page - 1))}
@@ -427,6 +460,27 @@ const Dashboard = () => {
               ))
             )}
           </div>
+          {validationResults.length > 0 && (
+            <div className="data-pagination">
+              <Button
+                variant="outline"
+                onClick={() => setValidationsPage((page) => Math.max(1, page - 1))}
+                disabled={validationsPage <= 1 || validationsLoading}
+              >
+                Onceki
+              </Button>
+              <span className="page-info">
+                Sayfa {validationsPage} / {validationsTotalPages}
+              </span>
+              <Button
+                variant="outline"
+                onClick={() => setValidationsPage((page) => Math.min(validationsTotalPages, page + 1))}
+                disabled={validationsPage >= validationsTotalPages || validationsLoading}
+              >
+                Sonraki
+              </Button>
+            </div>
+          )}
         </TabsContent>
         
         <TabsContent value="plu-stats" data-testid="plu-stats-tab-content">

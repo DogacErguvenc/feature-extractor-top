@@ -173,7 +173,7 @@
   margin-top: 24px;
 }
 
-.images-pagination {
+.data-pagination {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -181,7 +181,7 @@
   margin-top: 20px;
 }
 
-.images-pagination .page-info {
+.data-pagination .page-info {
   font-size: 0.9rem;
   color: #4a5568;
   font-weight: 600;

@@ -1060,8 +1060,15 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
 
 # Get validation results
 @api_router.get("/validation/results")
-async def get_validation_results(limit: int = 50):
-    results = await db.validation_results.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+async def get_validation_results(limit: int = 50, skip: int = 0):
+    if limit < 1:
+        limit = 1
+    if skip < 0:
+        skip = 0
+    cursor = db.validation_results.find({}, {"_id": 0}).sort("timestamp", -1)
+    if skip:
+        cursor = cursor.skip(skip)
+    results = await cursor.to_list(limit)
     for result in results:
         if isinstance(result['timestamp'], str):
             result['timestamp'] = datetime.fromisoformat(result['timestamp'])
