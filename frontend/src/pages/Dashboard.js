@@ -17,6 +17,7 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [systemMode, setSystemMode] = useState("training");
   const [selectedImage, setSelectedImage] = useState(null);
+  const [selectedValidation, setSelectedValidation] = useState(null);
   const [imageModalOpen, setImageModalOpen] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
   const [imagesPage, setImagesPage] = useState(1);
@@ -164,6 +165,7 @@ const Dashboard = () => {
   const handleImageClick = async (imageId) => {
     setLoadingImage(true);
     setImageModalOpen(true);
+    setSelectedValidation(null);
     try {
       const response = await axios.get(`${API}/images/${imageId}`);
       setSelectedImage(response.data);
@@ -176,9 +178,26 @@ const Dashboard = () => {
     }
   };
 
+  const handleValidationClick = async (validationId) => {
+    setLoadingImage(true);
+    setImageModalOpen(true);
+    setSelectedImage(null);
+    try {
+      const response = await axios.get(`${API}/validation/${validationId}`);
+      setSelectedValidation(response.data);
+    } catch (error) {
+      console.error("Error fetching validation image:", error);
+      toast.error("Fotograf yuklenemedi");
+      setImageModalOpen(false);
+    } finally {
+      setLoadingImage(false);
+    }
+  };
+
   const closeImageModal = () => {
     setImageModalOpen(false);
     setSelectedImage(null);
+    setSelectedValidation(null);
   };
 
   const handleAiConfigSave = async () => {
@@ -416,7 +435,13 @@ const Dashboard = () => {
               </Card>
             ) : (
               validationResults.map((result) => (
-                <Card key={result.id} className={`validation-card ${result.is_match ? 'match' : 'mismatch'}`} data-testid={`validation-card-${result.id}`}>
+                <Card
+                  key={result.id}
+                  className={`validation-card ${result.is_match ? "match" : "mismatch"} clickable`}
+                  data-testid={`validation-card-${result.id}`}
+                  onClick={() => handleValidationClick(result.id)}
+                  style={{ cursor: "pointer" }}
+                >
                   <CardHeader>
                     <CardTitle data-testid={`validation-plu-${result.id}`}>
                       <span>{result.selected_plu_name}</span>
@@ -562,34 +587,60 @@ const Dashboard = () => {
             {loadingImage ? (
               <div className="modal-loading">
                 <div className="spinner"></div>
-                <p>Fotoğraf yükleniyor...</p>
+                <p>Fotograf yukleniyor...</p>
               </div>
-            ) : selectedImage ? (
+            ) : (selectedImage || selectedValidation) ? (
               <div className="modal-content">
-                <div className="modal-header">
-                  <h2>PLU {selectedImage.plu_code}</h2>
-                  <p>{new Date(selectedImage.timestamp).toLocaleString('tr-TR')}</p>
-                  <span className={`phase-badge ${selectedImage.phase}`}>
-                    {selectedImage.phase === "training" ? "Egitim" : "Uretim"}
-                  </span>
-                </div>
-                
-                <div className="modal-image-container">
-                  <img 
-                    src={`data:image/jpeg;base64,${selectedImage.image_base64}`}
-                    alt={`PLU ${selectedImage.plu_code}`}
-                    className="modal-image"
-                  />
-                </div>
-                
-                <div className="modal-info">
-                  <p><strong>Fotoğraf ID:</strong> {selectedImage.id}</p>
-                  <p><strong>Zaman:</strong> {new Date(selectedImage.timestamp).toLocaleString('tr-TR')}</p>
-                </div>
+                {(() => {
+                  const modalData = selectedImage || selectedValidation;
+                  const title = modalData?.selected_plu_name
+                    ? `${modalData.selected_plu_name} (PLU ${modalData.plu_code})`
+                    : `PLU ${modalData?.plu_code ?? "-"}`;
+                  const timestamp = modalData?.timestamp
+                    ? new Date(modalData.timestamp).toLocaleString("tr-TR")
+                    : "-";
+                  const phase = modalData?.phase;
+                  const hasMatch = typeof modalData?.is_match === "boolean";
+                  return (
+                    <>
+                      <div className="modal-header">
+                        <h2>{title}</h2>
+                        <p>{timestamp}</p>
+                        {phase && (
+                          <span className={`phase-badge ${phase}`}>
+                            {phase === "training" ? "Egitim" : "Uretim"}
+                          </span>
+                        )}
+                        {hasMatch && (
+                          <span className={`result-badge ${modalData.is_match ? "match" : "mismatch"}`}>
+                            {modalData.is_match ? "Match" : "Mismatch"}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="modal-image-container">
+                        {modalData?.image_base64 ? (
+                          <img
+                            src={`data:image/jpeg;base64,${modalData.image_base64}`}
+                            alt={title}
+                            className="modal-image"
+                          />
+                        ) : (
+                          <p>Image not available</p>
+                        )}
+                      </div>
+
+                      <div className="modal-info">
+                        <p><strong>ID:</strong> {modalData?.id || "-"}</p>
+                        <p><strong>Zaman:</strong> {timestamp}</p>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             ) : (
               <div className="modal-error">
-                <p>Fotoğraf yüklenemedi</p>
+                <p>Fotograf yuklenemedi</p>
               </div>
             )}
           </div>

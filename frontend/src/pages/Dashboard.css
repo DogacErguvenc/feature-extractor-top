@@ -205,6 +205,15 @@
   box-shadow: 0 12px 24px rgba(102, 126, 234, 0.2);
 }
 
+.validation-card.clickable {
+  cursor: pointer;
+}
+
+.validation-card.clickable:hover {
+  border-color: #667eea;
+  box-shadow: 0 12px 24px rgba(102, 126, 234, 0.2);
+}
+
 .click-hint {
   font-size: 0.75rem;
   color: #667eea;
