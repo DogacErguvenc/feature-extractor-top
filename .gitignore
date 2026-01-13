@@ -66,6 +66,7 @@ agenthub/agents/youtube/db
 
 # Embedding artifacts
 backend/embedding_store/
+backend/embedding_store_*/
 backend/models/embedding_dino_ft/
 backend/models/*.pth
 backend/models/*.pt

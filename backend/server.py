@@ -806,12 +806,22 @@ async def test_camera():
 
 # Get captured images
 @api_router.get("/images/captured")
-async def get_captured_images(plu_code: Optional[str] = None, limit: int = 50):
+async def get_captured_images(
+    plu_code: Optional[str] = None, limit: int = 50, skip: int = 0
+):
     query = {}
     if plu_code:
         query["plu_code"] = plu_code
     
-    images = await db.captured_images.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    if limit < 1:
+        limit = 1
+    if skip < 0:
+        skip = 0
+
+    cursor = db.captured_images.find(query, {"_id": 0}).sort("timestamp", -1)
+    if skip:
+        cursor = cursor.skip(skip)
+    images = await cursor.to_list(limit)
     for img in images:
         if isinstance(img['timestamp'], str):
             img['timestamp'] = datetime.fromisoformat(img['timestamp'])

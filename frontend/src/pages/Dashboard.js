@@ -7,6 +7,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import "./Dashboard.css";
 
+const IMAGE_PAGE_SIZE = 20;
+
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
   const [validationResults, setValidationResults] = useState([]);
@@ -16,6 +18,8 @@ const Dashboard = () => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [imageModalOpen, setImageModalOpen] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
+  const [imagesPage, setImagesPage] = useState(1);
+  const [imagesLoading, setImagesLoading] = useState(false);
   const [aiConfig, setAiConfig] = useState({ provider: "local", model: "", version: "" });
   const [savingAiConfig, setSavingAiConfig] = useState(false);
   const [health, setHealth] = useState(null);
@@ -35,19 +39,31 @@ const Dashboard = () => {
     fetchDashboardData();
   }, []);
 
+  useEffect(() => {
+    fetchCapturedImages(imagesPage);
+  }, [imagesPage]);
+
+  useEffect(() => {
+    if (!stats) {
+      return;
+    }
+    const maxPage = Math.max(1, Math.ceil(stats.total_images / IMAGE_PAGE_SIZE));
+    if (imagesPage > maxPage) {
+      setImagesPage(maxPage);
+    }
+  }, [stats, imagesPage]);
+
   const fetchDashboardData = async () => {
     try {
-      const [statsRes, validationRes, imagesRes, modeRes, aiRes] = await Promise.all([
+      const [statsRes, validationRes, modeRes, aiRes] = await Promise.all([
         axios.get(`${API}/stats/dashboard`),
         axios.get(`${API}/validation/results?limit=20`),
-        axios.get(`${API}/images/captured?limit=20`),
         axios.get(`${API}/system/mode`),
         axios.get(`${API}/system/ai-config`)
       ]);
 
       setStats(statsRes.data);
       setValidationResults(validationRes.data);
-      setCapturedImages(imagesRes.data);
       setSystemMode(modeRes.data.mode);
       setAiConfig(aiRes.data);
       setLoading(false);
@@ -55,6 +71,22 @@ const Dashboard = () => {
       console.error("Error fetching dashboard data:", error);
       toast.error("Dashboard verileri yuklenemedi");
       setLoading(false);
+    }
+  };
+
+  const fetchCapturedImages = async (page = 1) => {
+    setImagesLoading(true);
+    try {
+      const skip = (page - 1) * IMAGE_PAGE_SIZE;
+      const res = await axios.get(
+        `${API}/images/captured?limit=${IMAGE_PAGE_SIZE}&skip=${skip}`
+      );
+      setCapturedImages(res.data || []);
+    } catch (error) {
+      console.error("Error fetching captured images:", error);
+      toast.error("Fotograf listesi yuklenemedi");
+    } finally {
+      setImagesLoading(false);
     }
   };
 
@@ -130,6 +162,9 @@ const Dashboard = () => {
       setSavingAiConfig(false);
     }
   };
+
+  const totalImages = stats?.total_images ?? 0;
+  const imagesTotalPages = Math.max(1, Math.ceil(totalImages / IMAGE_PAGE_SIZE));
 
   if (loading) {
     return (
@@ -269,7 +304,7 @@ const Dashboard = () => {
 
       <Tabs defaultValue="images" className="data-tabs" data-testid="data-tabs">
         <TabsList>
-          <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({capturedImages.length})</TabsTrigger>
+          <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({totalImages || capturedImages.length})</TabsTrigger>
           <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({validationResults.length})</TabsTrigger>
           <TabsTrigger value="plu-stats" data-testid="plu-stats-tab">PLU istatistikleri</TabsTrigger>
           <TabsTrigger value="health" data-testid="health-tab">Sistem Durumu</TabsTrigger>
@@ -313,6 +348,27 @@ const Dashboard = () => {
               ))
             )}
           </div>
+          {capturedImages.length > 0 && (
+            <div className="images-pagination">
+              <Button
+                variant="outline"
+                onClick={() => setImagesPage((page) => Math.max(1, page - 1))}
+                disabled={imagesPage <= 1 || imagesLoading}
+              >
+                Onceki
+              </Button>
+              <span className="page-info">
+                Sayfa {imagesPage} / {imagesTotalPages}
+              </span>
+              <Button
+                variant="outline"
+                onClick={() => setImagesPage((page) => Math.min(imagesTotalPages, page + 1))}
+                disabled={imagesPage >= imagesTotalPages || imagesLoading}
+              >
+                Sonraki
+              </Button>
+            </div>
+          )}
         </TabsContent>
         
         <TabsContent value="validations" data-testid="validations-tab-content">
