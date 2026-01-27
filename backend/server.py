@@ -418,6 +418,24 @@ def get_embedding_store():
     return EMBEDDING_STORE
 
 
+
+def get_latest_image_path(allowed_dir: Path) -> Path:
+    """Return the most recently modified image file in allowed_dir."""
+    if not allowed_dir.exists() or not allowed_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Allowed image dir not found: {allowed_dir}")
+    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    candidates = []
+    for item in allowed_dir.iterdir():
+        if item.is_file() and item.suffix.lower() in exts:
+            try:
+                candidates.append((item.stat().st_mtime, item))
+            except OSError:
+                continue
+    if not candidates:
+        raise HTTPException(status_code=400, detail=f"No images found in {allowed_dir}")
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
 def decode_base64_to_pil(image_base64: str) -> Image.Image:
     image_bytes = base64.b64decode(image_base64)
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -873,10 +891,15 @@ async def validate_sync(payload: ValidateSyncRequest):
         image_base64 = payload.image_base64
 
     if not image_base64:
-        image_base64 = capture_image_from_camera()
-        if not image_base64:
-            raise HTTPException(status_code=500, detail="Camera not available or failed to capture image")
-
+        # If file_path not provided, use latest image from ALLOWED_IMAGE_DIR
+        latest_path = get_latest_image_path(ALLOWED_IMAGE_DIR)
+        try:
+            file_bytes = latest_path.read_bytes()
+            image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            if not filename:
+                filename = latest_path.name
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
     # Run AI
     start = time.monotonic()
     result = await analyze_image_with_ai(image_base64, plu_obj)
@@ -1239,6 +1262,9 @@ async def load_mode_on_startup():
     AI_PROVIDER, AI_MODEL = provider, model
     logging.info(f"System mode loaded from DB: {SYSTEM_MODE}")
     logging.info(f"AI config loaded from DB: provider={AI_PROVIDER}, model={AI_MODEL}")
+
+
+
 
 
 
