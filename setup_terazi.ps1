@@ -37,12 +37,6 @@ function Ensure-Node {
 }
 
 
-function New-ApiKey {
-    $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    return ($bytes | ForEach-Object { $_.ToString("x2") }) -join ""
-}
-
 function Get-EnvMap($path) {
     $map = @{}
     if (Test-Path $path) {
@@ -81,9 +75,7 @@ function Setup-Env {
         $modelPath = Join-Path $RepoRoot "backend\models\local_model.onnx"
         $labelsPath = Join-Path $RepoRoot "backend\models\local_labels.json"
         $largeModelPath = Join-Path $RepoRoot "backend\models\local_model_large.onnx"
-        $largeLabelsPath = Join-Path $RepoRoot "backend\models\local_labels_large.json"
-        $apiKey = New-ApiKey
-        @"
+        $largeLabelsPath = Join-Path $RepoRoot "backend\models\local_labels_large.json"        @"
 MONGO_URL=mongodb://localhost:27017
 DB_NAME=terazi_production
 AI_PROVIDER=local
@@ -105,7 +97,6 @@ EMBEDDING_MARGIN=0.05
 EMBEDDING_DEVICE=
 GOOGLE_API_KEY=
 OPENAI_API_KEY=
-API_KEY=$apiKey
 CORS_ORIGINS=http://localhost:3000
 ALLOWED_IMAGE_DIR=$incomingDir
 DISABLE_DOCS=true
@@ -114,13 +105,9 @@ DISABLE_DOCS=true
     } else {
         Write-Info ".env zaten mevcut, degisiklik yapilmadi (ForceEnv kullanmadikca)."
     }
-
-    $envMap = Get-EnvMap $envPath
-    $frontendKey = $envMap["API_KEY"]
     if ((-not (Test-Path $frontendEnvPath)) -or $ForceEnv) {
         @"
 REACT_APP_BACKEND_URL=http://localhost:8001
-REACT_APP_API_KEY=$frontendKey
 "@ | Out-File -FilePath $frontendEnvPath -Encoding ASCII -Force
         Write-Info "Frontend .env olusturuldu: $frontendEnvPath"
     } else {
@@ -155,3 +142,5 @@ try {
     Write-Err $_
     exit 1
 }
+
+

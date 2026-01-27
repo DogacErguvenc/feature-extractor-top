@@ -46,13 +46,9 @@ Notlar
 - Kamera yoksa PLU seçimi 500 döner (mock yok).
 
 
-Security
---------
-- API_KEY zorunlu; backend .env icine yazin.
-- Frontend .env icine REACT_APP_API_KEY olarak ekleyin.
-- Tum /api isteklerinde x-api-key header gonderilmelidir.
-
+Security\r\n--------\r\n- API anahtari kullanilmiyor; /api istekleri aciktir.\r\n
 Embedding Store
 ---------------
 - Local (Embedding) icin once embedding store olusturun:
   `python backend/build_embedding_store.py --data-dir C:\terazi-datasets\train --out-dir backend\embedding_store`
+

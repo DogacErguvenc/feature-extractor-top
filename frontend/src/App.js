@@ -10,13 +10,6 @@ import Navigation from "@/components/Navigation";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
-const API_KEY = process.env.REACT_APP_API_KEY;
-
-// Set default auth header for all axios requests
-if (API_KEY) {
-  axios.defaults.headers.common["x-api-key"] = API_KEY;
-}
-
 export { API };
 
 function App() {
@@ -36,3 +29,4 @@ function App() {
 }
 
 export default App;
+

@@ -1,5 +1,4 @@
-﻿from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Depends, Security, UploadFile, File, Form
-from fastapi.security import APIKeyHeader
+﻿from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -50,7 +49,6 @@ LOCAL_LARGE_IMAGE_SIZE = int(os.environ.get('LOCAL_LARGE_IMAGE_SIZE', '300'))
 REFERENCE_IMAGE_DIR = Path(os.environ.get('REFERENCE_IMAGE_DIR', ROOT_DIR / "reference_images")).resolve()
 REFERENCE_MAX_IMAGES = int(os.environ.get('REFERENCE_MAX_IMAGES', '2'))
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'dense_v1')
-API_KEY = os.environ.get('API_KEY', '').strip()
 ALLOWED_IMAGE_DIR = Path(os.environ.get('ALLOWED_IMAGE_DIR', ROOT_DIR / "incoming")).resolve()
 EMBEDDING_STORE_DIR = Path(os.environ.get('EMBEDDING_STORE_DIR', ROOT_DIR / "embedding_store")).resolve()
 EMBEDDING_MODEL_NAME = os.environ.get('EMBEDDING_MODEL_NAME', 'vit_large_patch14_dinov2.lvd142m')
@@ -96,14 +94,6 @@ app = FastAPI(**app_kwargs)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
-
-def verify_api_key(api_key: str = Security(api_key_header)):
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API_KEY is not configured on the server")
-    if not api_key or api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 # System mode: "training" or "production"
 SYSTEM_MODE = "training"  # Default mode (overwritten at startup if stored)
@@ -1220,8 +1210,7 @@ async def health_check():
     )
 
 # Include the router in the main app
-app.include_router(api_router, dependencies=[Depends(verify_api_key)])
-
+app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -1245,13 +1234,12 @@ async def shutdown_db_client():
 async def load_mode_on_startup():
     global SYSTEM_MODE
     global AI_PROVIDER, AI_MODEL
-    if not API_KEY:
-        # Fail fast: force API key configuration in production
-        raise RuntimeError("API_KEY is not set. Define API_KEY in .env for secure access.")
     SYSTEM_MODE = await load_system_mode_from_db()
     provider, model = await load_ai_config_from_db()
     AI_PROVIDER, AI_MODEL = provider, model
     logging.info(f"System mode loaded from DB: {SYSTEM_MODE}")
     logging.info(f"AI config loaded from DB: provider={AI_PROVIDER}, model={AI_MODEL}")
+
+
 
 
