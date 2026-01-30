@@ -178,6 +178,7 @@ class ValidateSyncRequest(BaseModel):
     plu_code: str
     image_base64: Optional[str] = None
     filename: Optional[str] = None
+    file_name: Optional[str] = None
     file_path: Optional[str] = None
 
 class BatchValidationMeta(BaseModel):
@@ -869,7 +870,7 @@ async def validate_sync(payload: ValidateSyncRequest):
 
     # Determine image source: file_path -> image_base64 -> camera
     image_base64 = None
-    filename = payload.filename
+    filename = payload.file_name or payload.filename
 
     if payload.file_path:
         file_path = Path(payload.file_path)
@@ -891,15 +892,27 @@ async def validate_sync(payload: ValidateSyncRequest):
         image_base64 = payload.image_base64
 
     if not image_base64:
-        # If file_path not provided, use latest image from ALLOWED_IMAGE_DIR
-        latest_path = get_latest_image_path(ALLOWED_IMAGE_DIR)
-        try:
-            file_bytes = latest_path.read_bytes()
-            image_base64 = base64.b64encode(file_bytes).decode("utf-8")
-            if not filename:
-                filename = latest_path.name
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
+        if filename:
+            # If filename provided, read that file from ALLOWED_IMAGE_DIR
+            file_path = ALLOWED_IMAGE_DIR / filename
+            safe_path = resolve_safe_path(file_path)
+            if not safe_path.exists():
+                raise HTTPException(status_code=400, detail=f"File not found: {safe_path}")
+            try:
+                file_bytes = safe_path.read_bytes()
+                image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+        else:
+            # If file_path/filename not provided, use latest image from ALLOWED_IMAGE_DIR
+            latest_path = get_latest_image_path(ALLOWED_IMAGE_DIR)
+            try:
+                file_bytes = latest_path.read_bytes()
+                image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+                if not filename:
+                    filename = latest_path.name
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
     # Run AI
     start = time.monotonic()
     result = await analyze_image_with_ai(image_base64, plu_obj)
