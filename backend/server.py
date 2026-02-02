@@ -151,7 +151,7 @@ class ValidationResult(BaseModel):
     plu_code: str
     selected_plu_name: str
     image_base64: str
-    ai_analysis: str
+    ai_analysis: object
     is_match: bool
     confidence: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
