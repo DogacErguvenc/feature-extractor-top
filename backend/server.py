@@ -449,16 +449,33 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
     store = get_embedding_store()
     img = decode_base64_to_pil(image_base64)
     query_embeddings = await asyncio.to_thread(engine.extract_embeddings, img, True)
-    result = await asyncio.to_thread(
-        store.score_query,
-        query_embeddings,
-        plu_product.plu_code,
-        EMBEDDING_TOP_K,
-        EMBEDDING_MIN_SIM,
-        EMBEDDING_MARGIN,
-    )
+    try:
+        result = await asyncio.to_thread(
+            store.score_query,
+            query_embeddings,
+            plu_product.plu_code,
+            EMBEDDING_TOP_K,
+            EMBEDDING_MIN_SIM,
+            EMBEDDING_MARGIN,
+        )
+    except Exception as exc:
+        return {
+            "analysis": {
+                "error": str(exc),
+            },
+            "is_match": False,
+            "confidence": 0.0,
+        }
+    analysis = {
+        "selected_plu": str(plu_product.plu_code),
+        "selected_score": result.get("selected_score"),
+        "best_other_score": result.get("best_other_score"),
+        "predicted_plu": result.get("predicted_plu"),
+        "predicted_score": result.get("predicted_score"),
+        "embedding_count": result.get("embedding_count"),
+    }
     return {
-        "analysis": result["analysis"],
+        "analysis": analysis,
         "is_match": result["is_match"],
         "confidence": result["confidence"],
     }
