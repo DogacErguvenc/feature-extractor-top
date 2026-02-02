@@ -153,11 +153,11 @@ class ValidationResult(BaseModel):
     image_base64: str
     ai_analysis: str
     analysis_selected_plu: Optional[str] = None
-    analysis_selected_score: Optional[float] = None
-    analysis_best_other_score: Optional[float] = None
+    analysis_selected_score: Optional[str] = None
+    analysis_best_other_score: Optional[str] = None
     analysis_predicted_plu: Optional[str] = None
-    analysis_predicted_score: Optional[float] = None
-    analysis_embedding_count: Optional[int] = None
+    analysis_predicted_score: Optional[str] = None
+    analysis_embedding_count: Optional[str] = None
     is_match: bool
     confidence: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -489,12 +489,12 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
     )
     return {
         "analysis": analysis,
-        "analysis_selected_plu": analysis_detail.get("selected_plu"),
-        "analysis_selected_score": analysis_detail.get("selected_score"),
-        "analysis_best_other_score": analysis_detail.get("best_other_score"),
-        "analysis_predicted_plu": analysis_detail.get("predicted_plu"),
-        "analysis_predicted_score": analysis_detail.get("predicted_score"),
-        "analysis_embedding_count": analysis_detail.get("embedding_count"),
+        "analysis_selected_plu": str(analysis_detail.get("selected_plu")),
+        "analysis_selected_score": f"{analysis_detail.get('selected_score'):.3f}",
+        "analysis_best_other_score": f"{analysis_detail.get('best_other_score'):.3f}",
+        "analysis_predicted_plu": str(analysis_detail.get("predicted_plu")),
+        "analysis_predicted_score": f"{analysis_detail.get('predicted_score'):.3f}",
+        "analysis_embedding_count": str(analysis_detail.get("embedding_count")),
         "is_match": result["is_match"],
         "confidence": result["confidence"],
     }
