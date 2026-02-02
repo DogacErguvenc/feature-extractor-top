@@ -152,7 +152,6 @@ class ValidationResult(BaseModel):
     selected_plu_name: str
     image_base64: str
     ai_analysis: str
-    ai_analysis_detail: Optional[object] = None
     analysis_selected_plu: Optional[str] = None
     analysis_selected_score: Optional[float] = None
     analysis_best_other_score: Optional[float] = None
@@ -490,7 +489,6 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
     )
     return {
         "analysis": analysis,
-        "analysis_detail": analysis_detail,
         "analysis_selected_plu": analysis_detail.get("selected_plu"),
         "analysis_selected_score": analysis_detail.get("selected_score"),
         "analysis_best_other_score": analysis_detail.get("best_other_score"),
@@ -812,7 +810,6 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
                 selected_plu_name=plu_obj.name,
                 image_base64=image_base64,
                 ai_analysis=result["analysis"],
-                ai_analysis_detail=result.get("analysis_detail"),
                 analysis_selected_plu=result.get("analysis_selected_plu"),
                 analysis_selected_score=result.get("analysis_selected_score"),
                 analysis_best_other_score=result.get("analysis_best_other_score"),
@@ -969,7 +966,6 @@ async def validate_sync(payload: ValidateSyncRequest):
         selected_plu_name=plu_obj.name,
         image_base64=image_base64,
         ai_analysis=result["analysis"],
-        ai_analysis_detail=result.get("analysis_detail"),
         analysis_selected_plu=result.get("analysis_selected_plu"),
         analysis_selected_score=result.get("analysis_selected_score"),
         analysis_best_other_score=result.get("analysis_best_other_score"),
@@ -997,7 +993,6 @@ async def validate_sync(payload: ValidateSyncRequest):
         "is_match": result["is_match"],
         "confidence": result["confidence"],
         "analysis": result["analysis"],
-        "analysis_detail": result.get("analysis_detail"),
         "analysis_selected_plu": result.get("analysis_selected_plu"),
         "analysis_selected_score": result.get("analysis_selected_score"),
         "analysis_best_other_score": result.get("analysis_best_other_score"),
@@ -1087,7 +1082,6 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             selected_plu_name=plu_product["name"],
             image_base64=image_base64,
             ai_analysis=ai_result.get("analysis", ""),
-            ai_analysis_detail=ai_result.get("analysis_detail"),
             analysis_selected_plu=ai_result.get("analysis_selected_plu"),
             analysis_selected_score=ai_result.get("analysis_selected_score"),
             analysis_best_other_score=ai_result.get("analysis_best_other_score"),
@@ -1119,7 +1113,6 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             "is_match": ai_result.get("is_match", False),
             "confidence": ai_result.get("confidence", 0.0),
             "analysis": ai_result.get("analysis", ""),
-            "analysis_detail": ai_result.get("analysis_detail"),
             "analysis_selected_plu": ai_result.get("analysis_selected_plu"),
             "analysis_selected_score": ai_result.get("analysis_selected_score"),
             "analysis_best_other_score": ai_result.get("analysis_best_other_score"),
