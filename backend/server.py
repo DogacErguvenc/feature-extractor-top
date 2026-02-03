@@ -50,6 +50,8 @@ REFERENCE_IMAGE_DIR = Path(os.environ.get('REFERENCE_IMAGE_DIR', ROOT_DIR / "ref
 REFERENCE_MAX_IMAGES = int(os.environ.get('REFERENCE_MAX_IMAGES', '2'))
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'dense_v1')
 ALLOWED_IMAGE_DIR = Path(os.environ.get('ALLOWED_IMAGE_DIR', ROOT_DIR / "incoming")).resolve()
+TRAIN_DATA_DIR = Path(os.environ.get('TRAIN_DATA_DIR', ROOT_DIR.parent / "datasets" / "train")).resolve()
+CANDIDATE_REF_DIR = Path(os.environ.get('CANDIDATE_REF_DIR', ROOT_DIR / "candidate_ref_pool")).resolve()
 EMBEDDING_STORE_DIR = Path(os.environ.get('EMBEDDING_STORE_DIR', ROOT_DIR / "embedding_store")).resolve()
 EMBEDDING_MODEL_NAME = os.environ.get('EMBEDDING_MODEL_NAME', 'vit_large_patch14_dinov2.lvd142m')
 EMBEDDING_MODEL_WEIGHTS = os.environ.get('EMBEDDING_MODEL_WEIGHTS', '').strip()
@@ -60,6 +62,11 @@ EMBEDDING_TOP_K = int(os.environ.get('EMBEDDING_TOP_K', '3'))
 EMBEDDING_MIN_SIM = float(os.environ.get('EMBEDDING_MIN_SIM', '0.35'))
 EMBEDDING_MARGIN = float(os.environ.get('EMBEDDING_MARGIN', '0.05'))
 EMBEDDING_DEVICE = os.environ.get('EMBEDDING_DEVICE', '').strip()
+BOOTSTRAP_ENABLE = os.environ.get('BOOTSTRAP_ENABLE', 'false').lower() == 'true'
+BOOTSTRAP_MIN_COUNT = int(os.environ.get('BOOTSTRAP_MIN_COUNT', '20'))
+BOOTSTRAP_ACCEPT_SIM = float(os.environ.get('BOOTSTRAP_ACCEPT_SIM', '0.90'))
+BOOTSTRAP_REJECT_SIM = float(os.environ.get('BOOTSTRAP_REJECT_SIM', '0.60'))
+BOOTSTRAP_MAX_POOL = int(os.environ.get('BOOTSTRAP_MAX_POOL', '500'))
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -173,6 +180,37 @@ class ValidationResult(BaseModel):
     batch_id: Optional[str] = None
     source: Optional[str] = None
     original_filename: Optional[str] = None
+
+class RefCandidate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    plu_code: str
+    image_base64: str
+    status: str = "pending"  # pending | approved | rejected
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+    original_filename: Optional[str] = None
+    source_validation_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
+    approved_path: Optional[str] = None
+
+class RefCandidateCreateFromValidation(BaseModel):
+    validation_id: str
+    expected_plu: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
+class RefCandidateCreateFromFile(BaseModel):
+    plu_code: str
+    file_path: Optional[str] = None
+    file_name: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
+class RefCandidateReview(BaseModel):
+    notes: Optional[str] = None
 
 class PLUSelection(BaseModel):
     plu_code: str
@@ -449,12 +487,117 @@ def decode_base64_to_pil(image_base64: str) -> Image.Image:
     return img
 
 
+def _stringify_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _stringify_response(payload: dict) -> dict:
+    return {key: _stringify_value(val) for key, val in payload.items()}
+
+
+def _save_base64_image(target_dir: Path, filename_hint: Optional[str], image_base64: str) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    image_bytes = base64.b64decode(image_base64)
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert("RGB")
+        stem = Path(filename_hint).stem if filename_hint else "ref_candidate"
+        filename = f"{stem}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
+        out_path = target_dir / filename
+        img.save(out_path, format="JPEG", quality=95)
+        return out_path
+
+
+def _normalize_vec(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec) + 1e-12
+    return vec / norm
+
+
+async def _bootstrap_update(
+    plu_code: str,
+    embedding_vec: np.ndarray,
+    image_base64: str,
+    filename: Optional[str],
+    validation_id: Optional[str],
+) -> None:
+    if not BOOTSTRAP_ENABLE:
+        return
+    plu_code = str(plu_code)
+    # Load recent pool embeddings for this PLU
+    cursor = db.bootstrap_embeddings.find({"plu_code": plu_code}, {"_id": 0, "embedding": 1}).sort("created_at", -1).limit(BOOTSTRAP_MAX_POOL)
+    items = await cursor.to_list(BOOTSTRAP_MAX_POOL)
+    pool = [np.array(item["embedding"], dtype="float32") for item in items if item.get("embedding")]
+    if len(pool) < BOOTSTRAP_MIN_COUNT:
+        await db.bootstrap_embeddings.insert_one({
+            "plu_code": plu_code,
+            "embedding": embedding_vec.astype("float32").tolist(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "filename": filename,
+            "source_validation_id": validation_id,
+            "status": "warmup",
+        })
+        return
+
+    pool_mat = np.stack(pool, axis=0)
+    sims = pool_mat @ embedding_vec
+    k = min(3, sims.size)
+    top_idx = np.argpartition(sims, -k)[-k:]
+    score = float(sims[top_idx].mean())
+
+    status = "pending"
+    if score >= BOOTSTRAP_ACCEPT_SIM:
+        status = "approved"
+    elif score <= BOOTSTRAP_REJECT_SIM:
+        status = "rejected"
+
+    candidate = RefCandidate(
+        plu_code=plu_code,
+        image_base64=image_base64,
+        status=status if status != "approved" else "approved",
+        reason="bootstrap",
+        notes=f"bootstrap_score={score:.4f}",
+        original_filename=filename,
+        source_validation_id=validation_id,
+        approved_at=datetime.now(timezone.utc) if status == "approved" else None,
+        rejected_at=datetime.now(timezone.utc) if status == "rejected" else None,
+    )
+    doc = candidate.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    if doc.get("approved_at"):
+        doc["approved_at"] = candidate.approved_at.isoformat()
+    if doc.get("rejected_at"):
+        doc["rejected_at"] = candidate.rejected_at.isoformat()
+
+    if status == "approved":
+        out_path = _save_base64_image(TRAIN_DATA_DIR / plu_code, filename, image_base64)
+        doc["approved_path"] = str(out_path)
+        doc["approved_at"] = datetime.now(timezone.utc).isoformat()
+    await db.ref_candidates.insert_one(doc)
+
+    # Only add to pool if not rejected
+    if status != "rejected":
+        await db.bootstrap_embeddings.insert_one({
+            "plu_code": plu_code,
+            "embedding": embedding_vec.astype("float32").tolist(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "filename": filename,
+            "source_validation_id": validation_id,
+            "status": status,
+        })
+
+
 async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) -> dict:
     """Run local embedding similarity and return uniform result dict."""
     engine = get_embedding_engine()
     store = get_embedding_store()
     img = decode_base64_to_pil(image_base64)
     query_embeddings = await asyncio.to_thread(engine.extract_embeddings, img, True)
+    # Build a single vector for bootstrap usage
+    vec = query_embeddings.mean(axis=0)
+    vec = vec / (np.linalg.norm(vec) + 1e-12)
     try:
         result = await asyncio.to_thread(
             store.score_query,
@@ -467,9 +610,9 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
     except Exception as exc:
         return {
             "analysis": f"Error: {str(exc)}",
-            "analysis_detail": {"error": str(exc)},
             "is_match": False,
             "confidence": 0.0,
+            "embedding_vector": None,
         }
     analysis_detail = {
         "selected_plu": str(plu_product.plu_code),
@@ -495,6 +638,7 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
         "analysis_predicted_plu": str(analysis_detail.get("predicted_plu")),
         "analysis_predicted_score": f"{analysis_detail.get('predicted_score'):.3f}",
         "analysis_embedding_count": str(analysis_detail.get("embedding_count")),
+        "embedding_vector": vec.astype("float32"),
         "is_match": result["is_match"],
         "confidence": result["confidence"],
     }
@@ -831,6 +975,14 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
             doc = validation.model_dump()
             doc['timestamp'] = doc['timestamp'].isoformat()
             await db.validation_results.insert_one(doc)
+            if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
+                await _bootstrap_update(
+                    selection.plu_code,
+                    result.get("embedding_vector"),
+                    image_base64,
+                    None,
+                    validation.id,
+                )
         
         background_tasks.add_task(run_analysis)
         
@@ -988,8 +1140,17 @@ async def validate_sync(payload: ValidateSyncRequest):
     doc['timestamp'] = doc['timestamp'].isoformat()
     await db.validation_results.insert_one(doc)
 
+    if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
+        await _bootstrap_update(
+            payload.plu_code,
+            result.get("embedding_vector"),
+            image_base64,
+            filename,
+            validation.id,
+        )
+
     # Return concise response
-    return {
+    return _stringify_response({
         "is_match": result["is_match"],
         "confidence": result["confidence"],
         "analysis": result["analysis"],
@@ -1005,7 +1166,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         "timestamp": doc["timestamp"],
         "validation_id": validation.id,
         "filename": filename
-    }
+    })
 
 @api_router.post("/batch/validate")
 async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = File(...)):
@@ -1107,6 +1268,15 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
         doc['timestamp'] = doc['timestamp'].isoformat()
         await db.validation_results.insert_one(doc)
 
+        if BOOTSTRAP_ENABLE and ai_result.get("embedding_vector") is not None:
+            await _bootstrap_update(
+                expected_plu,
+                ai_result.get("embedding_vector"),
+                image_base64,
+                filename,
+                validation.id,
+            )
+
         result_payload = {
             "filename": filename,
             "plu_code": expected_plu,
@@ -1199,6 +1369,153 @@ async def get_validation_result(result_id: str):
         result['timestamp'] = datetime.fromisoformat(result['timestamp'])
     return result
 
+# Ref candidate pool
+@api_router.post("/ref-candidates/from-validation", response_model=RefCandidate)
+async def create_ref_candidate_from_validation(payload: RefCandidateCreateFromValidation):
+    validation = await db.validation_results.find_one({"id": payload.validation_id}, {"_id": 0})
+    if not validation:
+        raise HTTPException(status_code=404, detail="Validation result not found")
+    image_base64 = validation.get("image_base64")
+    if not image_base64:
+        raise HTTPException(status_code=400, detail="Validation result missing image")
+    plu_code = payload.expected_plu or validation.get("plu_code")
+    if not plu_code:
+        raise HTTPException(status_code=400, detail="PLU code is required")
+    candidate = RefCandidate(
+        plu_code=str(plu_code),
+        image_base64=image_base64,
+        reason=payload.reason,
+        notes=payload.notes,
+        original_filename=validation.get("original_filename") or validation.get("filename"),
+        source_validation_id=payload.validation_id,
+    )
+    doc = candidate.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    await db.ref_candidates.insert_one(doc)
+    return candidate
+
+
+@api_router.post("/ref-candidates/from-file", response_model=RefCandidate)
+async def create_ref_candidate_from_file(payload: RefCandidateCreateFromFile):
+    if not payload.file_path and not payload.file_name:
+        raise HTTPException(status_code=400, detail="file_path or file_name required")
+    if payload.file_path:
+        file_path = Path(payload.file_path)
+        if not file_path.is_absolute():
+            file_path = ALLOWED_IMAGE_DIR / file_path
+    else:
+        file_path = ALLOWED_IMAGE_DIR / payload.file_name
+    safe_path = resolve_safe_path(file_path)
+    if not safe_path.exists():
+        raise HTTPException(status_code=400, detail=f"File not found: {safe_path}")
+    try:
+        file_bytes = safe_path.read_bytes()
+        image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+    candidate = RefCandidate(
+        plu_code=str(payload.plu_code),
+        image_base64=image_base64,
+        reason=payload.reason,
+        notes=payload.notes,
+        original_filename=safe_path.name,
+    )
+    doc = candidate.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    await db.ref_candidates.insert_one(doc)
+    return candidate
+
+
+@api_router.get("/ref-candidates", response_model=List[RefCandidate])
+async def list_ref_candidates(status: Optional[str] = None, limit: int = 50, skip: int = 0):
+    query = {}
+    if status:
+        query["status"] = status
+    if limit < 1:
+        limit = 1
+    if skip < 0:
+        skip = 0
+    cursor = db.ref_candidates.find(query, {"_id": 0}).sort("created_at", -1)
+    if skip:
+        cursor = cursor.skip(skip)
+    candidates = await cursor.to_list(limit)
+    for cand in candidates:
+        if isinstance(cand.get("created_at"), str):
+            cand["created_at"] = datetime.fromisoformat(cand["created_at"])
+        if isinstance(cand.get("approved_at"), str):
+            cand["approved_at"] = datetime.fromisoformat(cand["approved_at"])
+        if isinstance(cand.get("rejected_at"), str):
+            cand["rejected_at"] = datetime.fromisoformat(cand["rejected_at"])
+    return [RefCandidate(**cand) for cand in candidates]
+
+
+@api_router.get("/ref-candidates/{candidate_id}", response_model=RefCandidate)
+async def get_ref_candidate(candidate_id: str):
+    cand = await db.ref_candidates.find_one({"id": candidate_id}, {"_id": 0})
+    if not cand:
+        raise HTTPException(status_code=404, detail="Ref candidate not found")
+    if isinstance(cand.get("created_at"), str):
+        cand["created_at"] = datetime.fromisoformat(cand["created_at"])
+    if isinstance(cand.get("approved_at"), str):
+        cand["approved_at"] = datetime.fromisoformat(cand["approved_at"])
+    if isinstance(cand.get("rejected_at"), str):
+        cand["rejected_at"] = datetime.fromisoformat(cand["rejected_at"])
+    return RefCandidate(**cand)
+
+
+@api_router.post("/ref-candidates/{candidate_id}/approve", response_model=RefCandidate)
+async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview = RefCandidateReview()):
+    cand = await db.ref_candidates.find_one({"id": candidate_id}, {"_id": 0})
+    if not cand:
+        raise HTTPException(status_code=404, detail="Ref candidate not found")
+    if cand.get("status") == "approved":
+        return RefCandidate(**cand)
+    image_base64 = cand.get("image_base64")
+    if not image_base64:
+        raise HTTPException(status_code=400, detail="Candidate missing image")
+    plu_code = str(cand.get("plu_code"))
+    target_dir = TRAIN_DATA_DIR / plu_code
+    out_path = _save_base64_image(target_dir, cand.get("original_filename"), image_base64)
+    update = {
+        "status": "approved",
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "approved_path": str(out_path),
+    }
+    if payload.notes:
+        update["notes"] = payload.notes
+    await db.ref_candidates.update_one({"id": candidate_id}, {"$set": update})
+    cand.update(update)
+    cand["approved_at"] = datetime.fromisoformat(cand["approved_at"])
+    return RefCandidate(**cand)
+
+
+@api_router.post("/ref-candidates/{candidate_id}/reject", response_model=RefCandidate)
+async def reject_ref_candidate(candidate_id: str, payload: RefCandidateReview = RefCandidateReview()):
+    cand = await db.ref_candidates.find_one({"id": candidate_id}, {"_id": 0})
+    if not cand:
+        raise HTTPException(status_code=404, detail="Ref candidate not found")
+    if cand.get("status") == "rejected":
+        return RefCandidate(**cand)
+    update = {
+        "status": "rejected",
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if payload.notes:
+        update["notes"] = payload.notes
+    await db.ref_candidates.update_one({"id": candidate_id}, {"$set": update})
+    cand.update(update)
+    cand["rejected_at"] = datetime.fromisoformat(cand["rejected_at"])
+    return RefCandidate(**cand)
+
+
+@api_router.get("/ref-candidates/stats")
+async def ref_candidate_stats():
+    pipeline = [
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+    ]
+    stats = await db.ref_candidates.aggregate(pipeline).to_list(10)
+    return {item["_id"]: item["count"] for item in stats}
+
 # System mode management
 @api_router.post("/system/mode")
 async def update_system_mode(mode_update: SystemModeUpdate):
@@ -1278,6 +1595,56 @@ async def get_dashboard_stats():
         images_by_plu=images_by_plu,
         current_mode=SYSTEM_MODE
     )
+
+
+@api_router.get("/stats/validation-kpi")
+async def get_validation_kpi(top_pairs: int = 10):
+    per_plu_pipeline = [
+        {"$group": {
+            "_id": "$plu_code",
+            "total": {"$sum": 1},
+            "match_count": {"$sum": {"$cond": ["$is_match", 1, 0]}},
+            "mismatch_count": {"$sum": {"$cond": ["$is_match", 0, 1]}},
+        }},
+        {"$sort": {"total": -1}},
+    ]
+    per_plu = await db.validation_results.aggregate(per_plu_pipeline).to_list(10000)
+    per_plu_stats = []
+    for item in per_plu:
+        total = item.get("total", 0) or 0
+        match_count = item.get("match_count", 0) or 0
+        mismatch_count = item.get("mismatch_count", 0) or 0
+        match_rate = (match_count / total) * 100.0 if total else 0.0
+        per_plu_stats.append({
+            "plu_code": item["_id"],
+            "total": total,
+            "match_count": match_count,
+            "mismatch_count": mismatch_count,
+            "match_rate": round(match_rate, 2),
+        })
+
+    confusion_pipeline = [
+        {"$match": {
+            "is_match": False,
+            "analysis_predicted_plu": {"$nin": [None, ""]},
+        }},
+        {"$group": {
+            "_id": {"selected": "$plu_code", "predicted": "$analysis_predicted_plu"},
+            "count": {"$sum": 1},
+        }},
+        {"$sort": {"count": -1}},
+        {"$limit": max(1, min(top_pairs, 100))},
+    ]
+    confusion = await db.validation_results.aggregate(confusion_pipeline).to_list(1000)
+    confusion_pairs = [
+        {"selected": c["_id"]["selected"], "predicted": c["_id"]["predicted"], "count": c["count"]}
+        for c in confusion
+    ]
+
+    return {
+        "per_plu": per_plu_stats,
+        "top_confusions": confusion_pairs,
+    }
 
 @api_router.get("/health", response_model=HealthStatus)
 async def health_check():
