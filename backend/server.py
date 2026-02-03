@@ -608,11 +608,13 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
             EMBEDDING_MARGIN,
         )
     except Exception as exc:
+        msg = str(exc)
+        # If PLU is missing in store, still allow bootstrap to run.
         return {
-            "analysis": f"Error: {str(exc)}",
+            "analysis": f"Error: {msg}",
             "is_match": False,
             "confidence": 0.0,
-            "embedding_vector": None,
+            "embedding_vector": vec.astype("float32"),
         }
     analysis_detail = {
         "selected_plu": str(plu_product.plu_code),
