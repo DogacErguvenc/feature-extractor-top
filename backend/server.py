@@ -67,6 +67,8 @@ BOOTSTRAP_MIN_COUNT = int(os.environ.get('BOOTSTRAP_MIN_COUNT', '20'))
 BOOTSTRAP_ACCEPT_SIM = float(os.environ.get('BOOTSTRAP_ACCEPT_SIM', '0.90'))
 BOOTSTRAP_REJECT_SIM = float(os.environ.get('BOOTSTRAP_REJECT_SIM', '0.60'))
 BOOTSTRAP_MAX_POOL = int(os.environ.get('BOOTSTRAP_MAX_POOL', '500'))
+CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
+CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -522,7 +524,7 @@ async def _append_embedding_to_store(
     image_base64: str,
     filename: Optional[str],
     source_tag: str,
-) -> str:
+) -> tuple[str, bool, Optional[float]]:
     store = get_embedding_store()
     cfg = store.config
     if (
@@ -543,24 +545,36 @@ async def _append_embedding_to_store(
     plu_doc = await db.plu_products.find_one({"plu_code": str(plu_code)}, {"_id": 0, "name": 1})
     plu_name = plu_doc.get("name") if plu_doc else ""
 
+    max_sim = None
+    added = True
+
     async with EMBEDDING_STORE_LOCK:
         store = get_embedding_store()
-        new_idx = int(store.embeddings.shape[0])
-        store.embeddings = np.vstack([store.embeddings, vec[None, :]])
-        store.meta.append({
-            "plu_code": str(plu_code),
-            "plu_name": plu_name,
-            "filename": Path(saved_path).name,
-            "source_path": str(saved_path),
-            "source": source_tag,
-        })
-        store.plu_index.setdefault(str(plu_code), []).append(new_idx)
+        plu_indices = store.plu_index.get(str(plu_code), [])
+        if CLUSTER_ENABLE and plu_indices:
+            existing = store.embeddings[np.array(plu_indices, dtype=int)]
+            sims = existing @ vec
+            max_sim = float(sims.max())
+            if max_sim >= CLUSTER_DUP_SIM:
+                added = False
 
-        from embedding_store import EmbeddingStore
+        if added:
+            new_idx = int(store.embeddings.shape[0])
+            store.embeddings = np.vstack([store.embeddings, vec[None, :]])
+            store.meta.append({
+                "plu_code": str(plu_code),
+                "plu_name": plu_name,
+                "filename": Path(saved_path).name,
+                "source_path": str(saved_path),
+                "source": source_tag,
+            })
+            store.plu_index.setdefault(str(plu_code), []).append(new_idx)
 
-        EmbeddingStore.save(EMBEDDING_STORE_DIR, store.embeddings, store.meta, store.plu_index, store.config)
+            from embedding_store import EmbeddingStore
 
-    return str(saved_path)
+            EmbeddingStore.save(EMBEDDING_STORE_DIR, store.embeddings, store.meta, store.plu_index, store.config)
+
+    return str(saved_path), added, max_sim
 
 
 async def _bootstrap_update(
@@ -620,7 +634,7 @@ async def _bootstrap_update(
 
     if status == "approved":
         try:
-            out_path = await _append_embedding_to_store(
+            out_path, added, max_sim = await _append_embedding_to_store(
                 plu_code,
                 image_base64,
                 filename,
@@ -628,6 +642,8 @@ async def _bootstrap_update(
             )
             doc["approved_path"] = str(out_path)
             doc["approved_at"] = datetime.now(timezone.utc).isoformat()
+            if not added:
+                doc["notes"] = f"{doc.get('notes', '')} | redundant_max_sim={max_sim:.4f}".strip()
         except Exception as exc:
             # Fallback to pending if store update fails
             doc["status"] = "pending"
@@ -1552,7 +1568,7 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
         raise HTTPException(status_code=400, detail="Candidate missing image")
     plu_code = str(cand.get("plu_code"))
     try:
-        out_path = await _append_embedding_to_store(
+        out_path, added, max_sim = await _append_embedding_to_store(
             plu_code,
             image_base64,
             cand.get("original_filename"),
@@ -1565,6 +1581,8 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
         "approved_at": datetime.now(timezone.utc).isoformat(),
         "approved_path": str(out_path),
     }
+    if not added:
+        update["notes"] = f"{update.get('notes', '')} | redundant_max_sim={max_sim:.4f}".strip()
     if payload.notes:
         update["notes"] = payload.notes
     await db.ref_candidates.update_one({"id": candidate_id}, {"$set": update})
