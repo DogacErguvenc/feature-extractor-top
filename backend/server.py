@@ -69,6 +69,8 @@ BOOTSTRAP_REJECT_SIM = float(os.environ.get('BOOTSTRAP_REJECT_SIM', '0.60'))
 BOOTSTRAP_MAX_POOL = int(os.environ.get('BOOTSTRAP_MAX_POOL', '500'))
 CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
 CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
+PLU_MAX_EMBEDDINGS = int(os.environ.get('PLU_MAX_EMBEDDINGS', '200'))
+PLU_MIN_EMBEDDINGS = int(os.environ.get('PLU_MIN_EMBEDDINGS', '40'))
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -519,6 +521,26 @@ def _normalize_vec(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
+def _farthest_point_sampling(embeddings: np.ndarray, k: int, seed_idx: Optional[int] = None) -> list[int]:
+    n = embeddings.shape[0]
+    if k >= n:
+        return list(range(n))
+    if seed_idx is None:
+        centroid = _normalize_vec(embeddings.mean(axis=0))
+        sims = embeddings @ centroid
+        seed_idx = int(np.argmax(sims))
+    selected = [seed_idx]
+    distances = 1.0 - (embeddings @ embeddings[seed_idx])
+    for _ in range(1, k):
+        idx = int(np.argmax(distances))
+        if idx in selected:
+            break
+        selected.append(idx)
+        new_dist = 1.0 - (embeddings @ embeddings[idx])
+        distances = np.minimum(distances, new_dist)
+    return selected
+
+
 async def _append_embedding_to_store(
     plu_code: str,
     image_base64: str,
@@ -569,6 +591,29 @@ async def _append_embedding_to_store(
                 "source": source_tag,
             })
             store.plu_index.setdefault(str(plu_code), []).append(new_idx)
+
+            # Auto-prune per PLU if budget exceeded
+            plu_indices = store.plu_index.get(str(plu_code), [])
+            if PLU_MAX_EMBEDDINGS > 0 and len(plu_indices) > PLU_MAX_EMBEDDINGS:
+                keep_count = max(PLU_MIN_EMBEDDINGS, min(PLU_MAX_EMBEDDINGS, len(plu_indices)))
+                plu_embeddings = store.embeddings[np.array(plu_indices, dtype=int)]
+                # Ensure newest embedding stays
+                local_new = len(plu_indices) - 1
+                keep_local = _farthest_point_sampling(plu_embeddings, keep_count, seed_idx=local_new)
+                keep_set = set(np.array(plu_indices, dtype=int)[np.array(keep_local, dtype=int)].tolist())
+                keep_indices = []
+                for idx in range(store.embeddings.shape[0]):
+                    if idx in keep_set or store.meta[idx].get("plu_code") != str(plu_code):
+                        keep_indices.append(idx)
+                new_embeddings = store.embeddings[np.array(keep_indices, dtype=int)]
+                new_meta = [store.meta[i] for i in keep_indices]
+                new_plu_index = {}
+                for new_idx2, old_idx in enumerate(keep_indices):
+                    plu = str(new_meta[new_idx2].get("plu_code"))
+                    new_plu_index.setdefault(plu, []).append(new_idx2)
+                store.embeddings = new_embeddings
+                store.meta = new_meta
+                store.plu_index = new_plu_index
 
             from embedding_store import EmbeddingStore
 
