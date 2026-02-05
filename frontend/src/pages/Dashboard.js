@@ -9,6 +9,7 @@ import "./Dashboard.css";
 
 const IMAGE_PAGE_SIZE = 20;
 const VALIDATION_PAGE_SIZE = 20;
+const REF_CANDIDATE_PAGE_SIZE = 20;
 
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
@@ -28,6 +29,9 @@ const Dashboard = () => {
   const [savingAiConfig, setSavingAiConfig] = useState(false);
   const [health, setHealth] = useState(null);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [refCandidates, setRefCandidates] = useState([]);
+  const [refCandidatesPage, setRefCandidatesPage] = useState(1);
+  const [refCandidatesLoading, setRefCandidatesLoading] = useState(false);
 
   const formatModel = (provider, model) => {
     const base = provider || "?";
@@ -50,6 +54,10 @@ const Dashboard = () => {
   useEffect(() => {
     fetchValidationResults(validationsPage);
   }, [validationsPage]);
+
+  useEffect(() => {
+    fetchRefCandidates(refCandidatesPage);
+  }, [refCandidatesPage]);
 
   useEffect(() => {
     if (!stats) {
@@ -119,6 +127,44 @@ const Dashboard = () => {
       toast.error("AI kontrol listesi yuklenemedi");
     } finally {
       setValidationsLoading(false);
+    }
+  };
+
+  const fetchRefCandidates = async (page = 1) => {
+    setRefCandidatesLoading(true);
+    try {
+      const skip = (page - 1) * REF_CANDIDATE_PAGE_SIZE;
+      const res = await axios.get(
+        `${API}/ref-candidates?status=pending&limit=${REF_CANDIDATE_PAGE_SIZE}&skip=${skip}`
+      );
+      setRefCandidates(res.data || []);
+    } catch (error) {
+      console.error("Error fetching ref candidates:", error);
+      toast.error("Ref aday listesi yuklenemedi");
+    } finally {
+      setRefCandidatesLoading(false);
+    }
+  };
+
+  const handleApproveCandidate = async (candidateId) => {
+    try {
+      await axios.post(`${API}/ref-candidates/${candidateId}/approve`);
+      toast.success("Aday onaylandi");
+      fetchRefCandidates(refCandidatesPage);
+    } catch (error) {
+      console.error("Error approving candidate:", error);
+      toast.error("Aday onaylanamadi");
+    }
+  };
+
+  const handleRejectCandidate = async (candidateId) => {
+    try {
+      await axios.post(`${API}/ref-candidates/${candidateId}/reject`);
+      toast.success("Aday reddedildi");
+      fetchRefCandidates(refCandidatesPage);
+    } catch (error) {
+      console.error("Error rejecting candidate:", error);
+      toast.error("Aday reddedilemedi");
     }
   };
 
@@ -358,6 +404,7 @@ const Dashboard = () => {
         <TabsList>
           <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({totalImages || capturedImages.length})</TabsTrigger>
           <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({totalValidations || validationResults.length})</TabsTrigger>
+          <TabsTrigger value="ref-candidates" data-testid="ref-candidates-tab">Ref Adaylari ({refCandidates.length})</TabsTrigger>
           <TabsTrigger value="plu-stats" data-testid="plu-stats-tab">PLU istatistikleri</TabsTrigger>
           <TabsTrigger value="health" data-testid="health-tab">Sistem Durumu</TabsTrigger>
         </TabsList>
@@ -501,6 +548,81 @@ const Dashboard = () => {
                 variant="outline"
                 onClick={() => setValidationsPage((page) => Math.min(validationsTotalPages, page + 1))}
                 disabled={validationsPage >= validationsTotalPages || validationsLoading}
+              >
+                Sonraki
+              </Button>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="ref-candidates" data-testid="ref-candidates-tab-content">
+          <div className="data-grid ref-candidates-grid">
+            {refCandidates.length === 0 ? (
+              <Card className="empty-state">
+                <CardContent className="empty-content">
+                  <div className="empty-icon">🗂️</div>
+                  <h3>Bekleyen aday yok</h3>
+                  <p>Bootstrap calisinca burada pending adaylar gorunur</p>
+                </CardContent>
+              </Card>
+            ) : (
+              refCandidates.map((cand) => (
+                <Card key={cand.id} className="candidate-card">
+                  <CardHeader>
+                    <CardTitle>PLU {cand.plu_code}</CardTitle>
+                    <CardDescription>
+                      {cand.created_at ? new Date(cand.created_at).toLocaleString("tr-TR") : "-"}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="candidate-image-wrap">
+                      {cand.image_base64 ? (
+                        <img
+                          src={`data:image/jpeg;base64,${cand.image_base64}`}
+                          alt={`ref-${cand.plu_code}`}
+                          className="candidate-image"
+                        />
+                      ) : (
+                        <div className="candidate-image-fallback">Image yok</div>
+                      )}
+                    </div>
+                    <div className="candidate-actions">
+                      <Button
+                        variant="outline"
+                        onClick={() => handleApproveCandidate(cand.id)}
+                        disabled={refCandidatesLoading}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => handleRejectCandidate(cand.id)}
+                        disabled={refCandidatesLoading}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+          {refCandidates.length > 0 && (
+            <div className="data-pagination">
+              <Button
+                variant="outline"
+                onClick={() => setRefCandidatesPage((page) => Math.max(1, page - 1))}
+                disabled={refCandidatesPage <= 1 || refCandidatesLoading}
+              >
+                Onceki
+              </Button>
+              <span className="page-info">
+                Sayfa {refCandidatesPage}
+              </span>
+              <Button
+                variant="outline"
+                onClick={() => setRefCandidatesPage((page) => page + 1)}
+                disabled={refCandidatesLoading}
               >
                 Sonraki
               </Button>
