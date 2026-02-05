@@ -648,6 +648,22 @@ async def _bootstrap_update(
         })
 
 
+def _schedule_bootstrap_update(
+    plu_code: str,
+    embedding_vec: np.ndarray,
+    image_base64: str,
+    filename: Optional[str],
+    validation_id: Optional[str],
+) -> None:
+    async def _runner():
+        try:
+            await _bootstrap_update(plu_code, embedding_vec, image_base64, filename, validation_id)
+        except Exception as exc:
+            logging.error(f"Bootstrap update failed for PLU {plu_code}: {exc}")
+
+    asyncio.create_task(_runner())
+
+
 async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) -> dict:
     """Run local embedding similarity and return uniform result dict."""
     engine = get_embedding_engine()
@@ -1037,7 +1053,7 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
             doc['timestamp'] = doc['timestamp'].isoformat()
             await db.validation_results.insert_one(doc)
             if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
-                await _bootstrap_update(
+                _schedule_bootstrap_update(
                     selection.plu_code,
                     result.get("embedding_vector"),
                     image_base64,
@@ -1202,7 +1218,7 @@ async def validate_sync(payload: ValidateSyncRequest):
     await db.validation_results.insert_one(doc)
 
     if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
-        await _bootstrap_update(
+        _schedule_bootstrap_update(
             payload.plu_code,
             result.get("embedding_vector"),
             image_base64,
@@ -1330,7 +1346,7 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
         await db.validation_results.insert_one(doc)
 
         if BOOTSTRAP_ENABLE and ai_result.get("embedding_vector") is not None:
-            await _bootstrap_update(
+            _schedule_bootstrap_update(
                 expected_plu,
                 ai_result.get("embedding_vector"),
                 image_base64,
