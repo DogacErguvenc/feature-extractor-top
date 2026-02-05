@@ -32,6 +32,7 @@ const Dashboard = () => {
   const [refCandidates, setRefCandidates] = useState([]);
   const [refCandidatesPage, setRefCandidatesPage] = useState(1);
   const [refCandidatesLoading, setRefCandidatesLoading] = useState(false);
+  const [refCandidatesStatus, setRefCandidatesStatus] = useState("pending");
 
   const formatModel = (provider, model) => {
     const base = provider || "?";
@@ -56,8 +57,8 @@ const Dashboard = () => {
   }, [validationsPage]);
 
   useEffect(() => {
-    fetchRefCandidates(refCandidatesPage);
-  }, [refCandidatesPage]);
+    fetchRefCandidates(refCandidatesPage, refCandidatesStatus);
+  }, [refCandidatesPage, refCandidatesStatus]);
 
   useEffect(() => {
     if (!stats) {
@@ -130,12 +131,12 @@ const Dashboard = () => {
     }
   };
 
-  const fetchRefCandidates = async (page = 1) => {
+  const fetchRefCandidates = async (page = 1, status = "pending") => {
     setRefCandidatesLoading(true);
     try {
       const skip = (page - 1) * REF_CANDIDATE_PAGE_SIZE;
       const res = await axios.get(
-        `${API}/ref-candidates?status=pending&limit=${REF_CANDIDATE_PAGE_SIZE}&skip=${skip}`
+        `${API}/ref-candidates?status=${status}&limit=${REF_CANDIDATE_PAGE_SIZE}&skip=${skip}`
       );
       setRefCandidates(res.data || []);
     } catch (error) {
@@ -150,7 +151,7 @@ const Dashboard = () => {
     try {
       await axios.post(`${API}/ref-candidates/${candidateId}/approve`);
       toast.success("Aday onaylandi");
-      fetchRefCandidates(refCandidatesPage);
+      fetchRefCandidates(refCandidatesPage, refCandidatesStatus);
     } catch (error) {
       console.error("Error approving candidate:", error);
       toast.error("Aday onaylanamadi");
@@ -161,7 +162,7 @@ const Dashboard = () => {
     try {
       await axios.post(`${API}/ref-candidates/${candidateId}/reject`);
       toast.success("Aday reddedildi");
-      fetchRefCandidates(refCandidatesPage);
+      fetchRefCandidates(refCandidatesPage, refCandidatesStatus);
     } catch (error) {
       console.error("Error rejecting candidate:", error);
       toast.error("Aday reddedilemedi");
@@ -556,13 +557,46 @@ const Dashboard = () => {
         </TabsContent>
 
         <TabsContent value="ref-candidates" data-testid="ref-candidates-tab-content">
+          <div className="ref-candidates-toolbar">
+            <span className="ref-status-label">Durum:</span>
+            <button
+              type="button"
+              className={`ref-status-chip ${refCandidatesStatus === "pending" ? "active" : ""}`}
+              onClick={() => {
+                setRefCandidatesStatus("pending");
+                setRefCandidatesPage(1);
+              }}
+            >
+              Bekleyen
+            </button>
+            <button
+              type="button"
+              className={`ref-status-chip ${refCandidatesStatus === "approved" ? "active" : ""}`}
+              onClick={() => {
+                setRefCandidatesStatus("approved");
+                setRefCandidatesPage(1);
+              }}
+            >
+              Onaylanan
+            </button>
+            <button
+              type="button"
+              className={`ref-status-chip ${refCandidatesStatus === "rejected" ? "active" : ""}`}
+              onClick={() => {
+                setRefCandidatesStatus("rejected");
+                setRefCandidatesPage(1);
+              }}
+            >
+              Reddedilen
+            </button>
+          </div>
           <div className="data-grid ref-candidates-grid">
             {refCandidates.length === 0 ? (
               <Card className="empty-state">
                 <CardContent className="empty-content">
                   <div className="empty-icon">🗂️</div>
-                  <h3>Bekleyen aday yok</h3>
-                  <p>Bootstrap calisinca burada pending adaylar gorunur</p>
+                  <h3>Aday yok</h3>
+                  <p>Bu durum icin kayit bulunamadi</p>
                 </CardContent>
               </Card>
             ) : (
@@ -587,20 +621,24 @@ const Dashboard = () => {
                       )}
                     </div>
                     <div className="candidate-actions">
-                      <Button
-                        variant="outline"
-                        onClick={() => handleApproveCandidate(cand.id)}
-                        disabled={refCandidatesLoading}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => handleRejectCandidate(cand.id)}
-                        disabled={refCandidatesLoading}
-                      >
-                        Reject
-                      </Button>
+                      {refCandidatesStatus === "pending" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            onClick={() => handleApproveCandidate(cand.id)}
+                            disabled={refCandidatesLoading}
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => handleRejectCandidate(cand.id)}
+                            disabled={refCandidatesLoading}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </CardContent>
                 </Card>

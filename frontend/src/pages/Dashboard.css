@@ -319,6 +319,36 @@
   text-transform: uppercase;
 }
 
+.ref-candidates-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 16px;
+  flex-wrap: wrap;
+}
+
+.ref-status-label {
+  font-size: 0.9rem;
+  color: #4a5568;
+}
+
+.ref-status-chip {
+  border: 1px solid #cbd5f5;
+  background: #ffffff;
+  color: #4a5568;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s ease;
+}
+
+.ref-status-chip.active {
+  background: #4f46e5;
+  color: #ffffff;
+  border-color: #4f46e5;
+}
+
 .ref-candidates-grid {
   margin-top: 24px;
 }
