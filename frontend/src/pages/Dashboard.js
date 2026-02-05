@@ -19,6 +19,7 @@ const Dashboard = () => {
   const [systemMode, setSystemMode] = useState("training");
   const [selectedImage, setSelectedImage] = useState(null);
   const [selectedValidation, setSelectedValidation] = useState(null);
+  const [selectedRefCandidate, setSelectedRefCandidate] = useState(null);
   const [imageModalOpen, setImageModalOpen] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
   const [imagesPage, setImagesPage] = useState(1);
@@ -245,6 +246,15 @@ const Dashboard = () => {
     setImageModalOpen(false);
     setSelectedImage(null);
     setSelectedValidation(null);
+    setSelectedRefCandidate(null);
+  };
+
+  const handleRefCandidateClick = (candidate) => {
+    setLoadingImage(false);
+    setImageModalOpen(true);
+    setSelectedImage(null);
+    setSelectedValidation(null);
+    setSelectedRefCandidate(candidate);
   };
 
   const handleAiConfigSave = async () => {
@@ -615,6 +625,7 @@ const Dashboard = () => {
                           src={`data:image/jpeg;base64,${cand.image_base64}`}
                           alt={`ref-${cand.plu_code}`}
                           className="candidate-image"
+                          onClick={() => handleRefCandidateClick(cand)}
                         />
                       ) : (
                         <div className="candidate-image-fallback">Image yok</div>
@@ -749,16 +760,15 @@ const Dashboard = () => {
                 <div className="spinner"></div>
                 <p>Fotograf yukleniyor...</p>
               </div>
-            ) : (selectedImage || selectedValidation) ? (
+            ) : (selectedImage || selectedValidation || selectedRefCandidate) ? (
               <div className="modal-content">
                 {(() => {
-                  const modalData = selectedImage || selectedValidation;
+                  const modalData = selectedImage || selectedValidation || selectedRefCandidate;
                   const title = modalData?.selected_plu_name
                     ? `${modalData.selected_plu_name} (PLU ${modalData.plu_code})`
                     : `PLU ${modalData?.plu_code ?? "-"}`;
-                  const timestamp = modalData?.timestamp
-                    ? new Date(modalData.timestamp).toLocaleString("tr-TR")
-                    : "-";
+                  const rawTime = modalData?.timestamp || modalData?.created_at;
+                  const timestamp = rawTime ? new Date(rawTime).toLocaleString("tr-TR") : "-";
                   const phase = modalData?.phase;
                   const hasMatch = typeof modalData?.is_match === "boolean";
                   return (
