@@ -127,6 +127,7 @@ LOCAL_MODEL_SPECS = {
 LOCAL_MODEL_CACHE: dict[str, Tuple[ort.InferenceSession, str, List[dict]]] = {}
 EMBEDDING_ENGINE = None
 EMBEDDING_STORE = None
+EMBEDDING_STORE_LOCK = asyncio.Lock()
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -516,6 +517,52 @@ def _normalize_vec(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
+async def _append_embedding_to_store(
+    plu_code: str,
+    image_base64: str,
+    filename: Optional[str],
+    source_tag: str,
+) -> str:
+    store = get_embedding_store()
+    cfg = store.config
+    if (
+        cfg.model_name != EMBEDDING_MODEL_NAME
+        or cfg.image_size != EMBEDDING_IMAGE_SIZE
+        or cfg.scale_size != EMBEDDING_SCALE_SIZE
+        or cfg.crop_mode != EMBEDDING_CROP_MODE
+    ):
+        raise RuntimeError("Embedding store config does not match current embedding settings.")
+
+    img = decode_base64_to_pil(image_base64)
+    engine = get_embedding_engine()
+    vec = await asyncio.to_thread(engine.embed_image, img, True)
+    vec = vec.astype("float32")
+
+    saved_path = _save_base64_image(CANDIDATE_REF_DIR / str(plu_code), filename, image_base64)
+
+    plu_doc = await db.plu_products.find_one({"plu_code": str(plu_code)}, {"_id": 0, "name": 1})
+    plu_name = plu_doc.get("name") if plu_doc else ""
+
+    async with EMBEDDING_STORE_LOCK:
+        store = get_embedding_store()
+        new_idx = int(store.embeddings.shape[0])
+        store.embeddings = np.vstack([store.embeddings, vec[None, :]])
+        store.meta.append({
+            "plu_code": str(plu_code),
+            "plu_name": plu_name,
+            "filename": Path(saved_path).name,
+            "source_path": str(saved_path),
+            "source": source_tag,
+        })
+        store.plu_index.setdefault(str(plu_code), []).append(new_idx)
+
+        from embedding_store import EmbeddingStore
+
+        EmbeddingStore.save(EMBEDDING_STORE_DIR, store.embeddings, store.meta, store.plu_index, store.config)
+
+    return str(saved_path)
+
+
 async def _bootstrap_update(
     plu_code: str,
     embedding_vec: np.ndarray,
@@ -572,9 +619,21 @@ async def _bootstrap_update(
         doc["rejected_at"] = candidate.rejected_at.isoformat()
 
     if status == "approved":
-        out_path = _save_base64_image(TRAIN_DATA_DIR / plu_code, filename, image_base64)
-        doc["approved_path"] = str(out_path)
-        doc["approved_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            out_path = await _append_embedding_to_store(
+                plu_code,
+                image_base64,
+                filename,
+                source_tag="bootstrap_auto",
+            )
+            doc["approved_path"] = str(out_path)
+            doc["approved_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            # Fallback to pending if store update fails
+            doc["status"] = "pending"
+            doc["approved_at"] = None
+            doc["notes"] = f"{doc.get('notes', '')} | auto_store_failed: {exc}"
+    status = doc.get("status", status)
     await db.ref_candidates.insert_one(doc)
 
     # Only add to pool if not rejected
@@ -1476,8 +1535,15 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
     if not image_base64:
         raise HTTPException(status_code=400, detail="Candidate missing image")
     plu_code = str(cand.get("plu_code"))
-    target_dir = TRAIN_DATA_DIR / plu_code
-    out_path = _save_base64_image(target_dir, cand.get("original_filename"), image_base64)
+    try:
+        out_path = await _append_embedding_to_store(
+            plu_code,
+            image_base64,
+            cand.get("original_filename"),
+            source_tag="manual_approve",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     update = {
         "status": "approved",
         "approved_at": datetime.now(timezone.utc).isoformat(),
