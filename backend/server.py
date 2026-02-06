@@ -67,6 +67,10 @@ BOOTSTRAP_MIN_COUNT = int(os.environ.get('BOOTSTRAP_MIN_COUNT', '20'))
 BOOTSTRAP_ACCEPT_SIM = float(os.environ.get('BOOTSTRAP_ACCEPT_SIM', '0.90'))
 BOOTSTRAP_REJECT_SIM = float(os.environ.get('BOOTSTRAP_REJECT_SIM', '0.60'))
 BOOTSTRAP_MAX_POOL = int(os.environ.get('BOOTSTRAP_MAX_POOL', '500'))
+BOOTSTRAP_USE_PROTOTYPES = os.environ.get('BOOTSTRAP_USE_PROTOTYPES', 'true').lower() == 'true'
+BOOTSTRAP_PROTOTYPE_K = int(os.environ.get('BOOTSTRAP_PROTOTYPE_K', '6'))
+BOOTSTRAP_SUPPORT_SIM = float(os.environ.get('BOOTSTRAP_SUPPORT_SIM', str(BOOTSTRAP_ACCEPT_SIM)))
+BOOTSTRAP_SUPPORT_COUNT = int(os.environ.get('BOOTSTRAP_SUPPORT_COUNT', '3'))
 CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
 CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
 PLU_MAX_EMBEDDINGS = int(os.environ.get('PLU_MAX_EMBEDDINGS', '200'))
@@ -200,6 +204,9 @@ class RefCandidate(BaseModel):
     approved_at: Optional[datetime] = None
     rejected_at: Optional[datetime] = None
     approved_path: Optional[str] = None
+    bootstrap_score: Optional[float] = None
+    bootstrap_support: Optional[int] = None
+    bootstrap_proto_k: Optional[int] = None
 
 class RefCandidateCreateFromValidation(BaseModel):
     validation_id: str
@@ -649,12 +656,23 @@ async def _bootstrap_update(
 
     pool_mat = np.stack(pool, axis=0)
     sims = pool_mat @ embedding_vec
-    k = min(3, sims.size)
-    top_idx = np.argpartition(sims, -k)[-k:]
-    score = float(sims[top_idx].mean())
+    support_count = int((sims >= BOOTSTRAP_SUPPORT_SIM).sum())
+    proto_k = 0
+    if BOOTSTRAP_USE_PROTOTYPES and pool_mat.shape[0] > 0:
+        proto_k = min(BOOTSTRAP_PROTOTYPE_K, pool_mat.shape[0])
+        proto_idx = _farthest_point_sampling(pool_mat, proto_k)
+        proto_mat = pool_mat[np.array(proto_idx, dtype=int)]
+        proto_sims = proto_mat @ embedding_vec
+        k = min(3, proto_sims.size)
+        top_idx = np.argpartition(proto_sims, -k)[-k:]
+        score = float(proto_sims[top_idx].mean())
+    else:
+        k = min(3, sims.size)
+        top_idx = np.argpartition(sims, -k)[-k:]
+        score = float(sims[top_idx].mean())
 
     status = "pending"
-    if score >= BOOTSTRAP_ACCEPT_SIM:
+    if score >= BOOTSTRAP_ACCEPT_SIM and support_count >= BOOTSTRAP_SUPPORT_COUNT:
         status = "approved"
     elif score <= BOOTSTRAP_REJECT_SIM:
         status = "rejected"
@@ -664,11 +682,18 @@ async def _bootstrap_update(
         image_base64=image_base64,
         status=status if status != "approved" else "approved",
         reason="bootstrap",
-        notes=f"bootstrap_score={score:.4f}",
+        notes=(
+            f"bootstrap_score={score:.4f}; "
+            f"support={support_count}/{BOOTSTRAP_SUPPORT_COUNT}; "
+            f"proto_k={proto_k}"
+        ),
         original_filename=filename,
         source_validation_id=validation_id,
         approved_at=datetime.now(timezone.utc) if status == "approved" else None,
         rejected_at=datetime.now(timezone.utc) if status == "rejected" else None,
+        bootstrap_score=score,
+        bootstrap_support=support_count,
+        bootstrap_proto_k=proto_k if proto_k > 0 else None,
     )
     doc = candidate.model_dump()
     doc["created_at"] = doc["created_at"].isoformat()
