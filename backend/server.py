@@ -75,6 +75,15 @@ CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
 CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
 PLU_MAX_EMBEDDINGS = int(os.environ.get('PLU_MAX_EMBEDDINGS', '200'))
 PLU_MIN_EMBEDDINGS = int(os.environ.get('PLU_MIN_EMBEDDINGS', '40'))
+_raw_plu_budget_path = os.environ.get('PLU_BUDGETS_PATH', '').strip()
+_default_plu_budget_path = (ROOT_DIR / "plu_budgets.json")
+if _raw_plu_budget_path:
+    PLU_BUDGETS_PATH = Path(_raw_plu_budget_path).expanduser().resolve()
+elif _default_plu_budget_path.exists():
+    PLU_BUDGETS_PATH = _default_plu_budget_path
+else:
+    PLU_BUDGETS_PATH = None
+PLU_BUDGETS_CACHE: Optional[dict] = None
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -98,6 +107,67 @@ def resolve_safe_path(path_candidate: Path) -> Path:
     if common != os.path.normcase(str(allowed)):
         raise HTTPException(status_code=400, detail="File path is outside allowed directory")
     return real_path
+
+
+def _load_plu_budgets() -> Optional[dict]:
+    global PLU_BUDGETS_CACHE
+    if PLU_BUDGETS_CACHE is not None:
+        return PLU_BUDGETS_CACHE
+    if not PLU_BUDGETS_PATH:
+        PLU_BUDGETS_CACHE = None
+        return None
+    try:
+        if not PLU_BUDGETS_PATH.exists():
+            PLU_BUDGETS_CACHE = None
+            return None
+        with PLU_BUDGETS_PATH.open("r", encoding="utf-8") as fh:
+            PLU_BUDGETS_CACHE = json.load(fh)
+        return PLU_BUDGETS_CACHE
+    except Exception as exc:
+        logging.error(f"Failed to load PLU budgets from {PLU_BUDGETS_PATH}: {exc}")
+        PLU_BUDGETS_CACHE = None
+        return None
+
+
+def _get_plu_budget(plu_code: str) -> tuple[int, int, str]:
+    """Return (min_budget, max_budget, tier_name) for a PLU."""
+    plu_code = str(plu_code)
+    min_budget = max(0, int(PLU_MIN_EMBEDDINGS))
+    max_budget = max(0, int(PLU_MAX_EMBEDDINGS))
+    tier_name = "default"
+    cfg = _load_plu_budgets()
+    if not cfg:
+        return min_budget, max_budget, tier_name
+
+    default_cfg = cfg.get("default", {})
+    if isinstance(default_cfg, dict):
+        min_budget = max(0, int(default_cfg.get("min", min_budget)))
+        max_budget = max(0, int(default_cfg.get("max", max_budget)))
+
+    # Per-PLU override takes precedence
+    plu_overrides = cfg.get("plu_overrides", {}) or {}
+    override = plu_overrides.get(plu_code)
+    if isinstance(override, dict):
+        min_budget = max(0, int(override.get("min", min_budget)))
+        max_budget = max(0, int(override.get("max", max_budget)))
+        tier_name = "override"
+        if max_budget < min_budget:
+            max_budget = min_budget
+        return min_budget, max_budget, tier_name
+
+    # Otherwise, use tier mapping
+    plu_tiers = cfg.get("plu_tiers", {}) or {}
+    tiers = cfg.get("tiers", {}) or {}
+    tier = plu_tiers.get(plu_code)
+    if isinstance(tier, str) and tier in tiers and isinstance(tiers[tier], dict):
+        tier_cfg = tiers[tier]
+        min_budget = max(0, int(tier_cfg.get("min", min_budget)))
+        max_budget = max(0, int(tier_cfg.get("max", max_budget)))
+        tier_name = tier
+
+    if max_budget < min_budget:
+        max_budget = min_budget
+    return min_budget, max_budget, tier_name
 
 # Configure FastAPI (optionally disable docs in production)
 app_kwargs = {}
@@ -599,10 +669,11 @@ async def _append_embedding_to_store(
             })
             store.plu_index.setdefault(str(plu_code), []).append(new_idx)
 
-            # Auto-prune per PLU if budget exceeded
+            # Auto-prune per PLU if budget exceeded (tiered budgets supported)
             plu_indices = store.plu_index.get(str(plu_code), [])
-            if PLU_MAX_EMBEDDINGS > 0 and len(plu_indices) > PLU_MAX_EMBEDDINGS:
-                keep_count = max(PLU_MIN_EMBEDDINGS, min(PLU_MAX_EMBEDDINGS, len(plu_indices)))
+            min_budget, max_budget, _tier = _get_plu_budget(str(plu_code))
+            if max_budget > 0 and len(plu_indices) > max_budget:
+                keep_count = max(min_budget, min(max_budget, len(plu_indices)))
                 plu_embeddings = store.embeddings[np.array(plu_indices, dtype=int)]
                 # Ensure newest embedding stays
                 local_new = len(plu_indices) - 1
