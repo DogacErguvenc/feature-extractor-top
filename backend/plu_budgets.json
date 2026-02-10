@@ -1,0 +1,5 @@
+{
+  "default": { "min": 40, "max": 200 },
+  "tiers": { "easy": { "min": 5, "max": 6 } },
+  "plu_tiers": { "41100042": "easy" }
+}
