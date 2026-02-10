@@ -84,6 +84,16 @@ elif _default_plu_budget_path.exists():
 else:
     PLU_BUDGETS_PATH = None
 PLU_BUDGETS_CACHE: Optional[dict] = None
+TRAY_ROI_ENABLE = os.environ.get('TRAY_ROI_ENABLE', 'false').lower() == 'true'
+TRAY_ROI_STRICT = os.environ.get('TRAY_ROI_STRICT', 'false').lower() == 'true'
+_raw_tray_roi_path = os.environ.get('TRAY_ROI_PATH', '').strip()
+TRAY_ROI_PATH = (
+    Path(_raw_tray_roi_path).expanduser().resolve()
+    if _raw_tray_roi_path
+    else (ROOT_DIR / "tray_roi.json")
+)
+TRAY_ROI_CACHE: Optional[dict] = None
+TRAY_ROI_CACHE_MTIME: Optional[float] = None
 DEFAULT_CORS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -168,6 +178,167 @@ def _get_plu_budget(plu_code: str) -> tuple[int, int, str]:
     if max_budget < min_budget:
         max_budget = min_budget
     return min_budget, max_budget, tier_name
+
+def _validate_tray_roi_config(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("ROI config must be a JSON object")
+    points = raw.get("points")
+    if not isinstance(points, list) or len(points) != 4:
+        raise ValueError("ROI config requires exactly 4 points")
+    normalized_points = []
+    for point in points:
+        if not isinstance(point, list) or len(point) != 2:
+            raise ValueError("Each point must be [x, y]")
+        x = float(point[0])
+        y = float(point[1])
+        normalized_points.append([x, y])
+
+    source_size = raw.get("source_size")
+    if source_size is not None:
+        if not isinstance(source_size, list) or len(source_size) != 2:
+            raise ValueError("source_size must be [width, height]")
+        source_size = [int(source_size[0]), int(source_size[1])]
+        if source_size[0] <= 0 or source_size[1] <= 0:
+            raise ValueError("source_size must be positive")
+
+    output_size = raw.get("output_size")
+    if output_size is not None:
+        if not isinstance(output_size, list) or len(output_size) != 2:
+            raise ValueError("output_size must be [width, height]")
+        output_size = [int(output_size[0]), int(output_size[1])]
+        if output_size[0] <= 0 or output_size[1] <= 0:
+            raise ValueError("output_size must be positive")
+
+    return {
+        "points": normalized_points,
+        "source_size": source_size,
+        "output_size": output_size,
+    }
+
+
+def _load_tray_roi(force_reload: bool = False) -> Optional[dict]:
+    global TRAY_ROI_CACHE
+    global TRAY_ROI_CACHE_MTIME
+    try:
+        if not TRAY_ROI_PATH.exists():
+            TRAY_ROI_CACHE = None
+            TRAY_ROI_CACHE_MTIME = None
+            return None
+        stat = TRAY_ROI_PATH.stat()
+        mtime = stat.st_mtime
+        if (
+            not force_reload
+            and TRAY_ROI_CACHE is not None
+            and TRAY_ROI_CACHE_MTIME is not None
+            and mtime == TRAY_ROI_CACHE_MTIME
+        ):
+            return TRAY_ROI_CACHE
+
+        raw = json.loads(TRAY_ROI_PATH.read_text(encoding="utf-8"))
+        cfg = _validate_tray_roi_config(raw)
+        TRAY_ROI_CACHE = cfg
+        TRAY_ROI_CACHE_MTIME = mtime
+        return cfg
+    except Exception as exc:
+        logging.error(f"Failed to load tray ROI config from {TRAY_ROI_PATH}: {exc}")
+        TRAY_ROI_CACHE = None
+        TRAY_ROI_CACHE_MTIME = None
+        return None
+
+
+def _save_tray_roi(cfg: dict) -> None:
+    global TRAY_ROI_CACHE
+    global TRAY_ROI_CACHE_MTIME
+    TRAY_ROI_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRAY_ROI_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    TRAY_ROI_CACHE = cfg
+    TRAY_ROI_CACHE_MTIME = TRAY_ROI_PATH.stat().st_mtime
+
+
+def _roi_points_to_pixels(points: List[List[float]], width: int, height: int, source_size: Optional[List[int]]) -> np.ndarray:
+    arr = np.array(points, dtype=np.float32)
+    if arr.shape != (4, 2):
+        raise ValueError("ROI points must be shape (4,2)")
+
+    if np.max(arr) <= 1.5 and np.min(arr) >= -0.1:
+        arr[:, 0] = arr[:, 0] * float(width)
+        arr[:, 1] = arr[:, 1] * float(height)
+    elif source_size and len(source_size) == 2 and source_size[0] > 0 and source_size[1] > 0:
+        sx = float(width) / float(source_size[0])
+        sy = float(height) / float(source_size[1])
+        arr[:, 0] = arr[:, 0] * sx
+        arr[:, 1] = arr[:, 1] * sy
+
+    arr[:, 0] = np.clip(arr[:, 0], 0, max(0, width - 1))
+    arr[:, 1] = np.clip(arr[:, 1], 0, max(0, height - 1))
+    return arr.astype(np.float32)
+
+
+def _compute_roi_output_size(points_px: np.ndarray, output_size: Optional[List[int]]) -> Tuple[int, int]:
+    if output_size and len(output_size) == 2:
+        return int(output_size[0]), int(output_size[1])
+
+    tl, tr, br, bl = points_px
+    width_a = np.linalg.norm(br - bl)
+    width_b = np.linalg.norm(tr - tl)
+    height_a = np.linalg.norm(tr - br)
+    height_b = np.linalg.norm(tl - bl)
+    out_w = int(max(width_a, width_b))
+    out_h = int(max(height_a, height_b))
+    return max(1, out_w), max(1, out_h)
+
+
+def _encode_pil_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=quality)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def preprocess_image_for_ai(image_base64: str) -> Tuple[str, dict]:
+    if not TRAY_ROI_ENABLE:
+        return image_base64, {"roi_applied": False, "roi_reason": "disabled"}
+
+    cfg = _load_tray_roi()
+    if not cfg:
+        if TRAY_ROI_STRICT:
+            raise RuntimeError(f"Tray ROI is enabled but config is missing/invalid: {TRAY_ROI_PATH}")
+        return image_base64, {"roi_applied": False, "roi_reason": "missing_config"}
+
+    try:
+        img = decode_base64_to_pil(image_base64)
+        arr = np.array(img.convert("RGB"), dtype=np.uint8)
+        h, w = arr.shape[:2]
+        pts = _roi_points_to_pixels(cfg["points"], w, h, cfg.get("source_size"))
+        area = abs(float(cv2.contourArea(pts)))
+        if area < 10.0:
+            raise ValueError("ROI polygon area is too small")
+
+        out_w, out_h = _compute_roi_output_size(pts, cfg.get("output_size"))
+        dst = np.array(
+            [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(pts, dst)
+        warped = cv2.warpPerspective(
+            arr,
+            matrix,
+            (out_w, out_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(114, 114, 114),
+        )
+        cropped = Image.fromarray(warped)
+        return _encode_pil_to_base64_jpeg(cropped, quality=85), {
+            "roi_applied": True,
+            "roi_reason": "ok",
+            "roi_width": out_w,
+            "roi_height": out_h,
+        }
+    except Exception as exc:
+        if TRAY_ROI_STRICT:
+            raise RuntimeError(f"Tray ROI apply failed: {exc}") from exc
+        logging.warning(f"Tray ROI apply skipped: {exc}")
+        return image_base64, {"roi_applied": False, "roi_reason": f"apply_failed: {exc}"}
 
 # Configure FastAPI (optionally disable docs in production)
 app_kwargs = {}
@@ -293,6 +464,11 @@ class RefCandidateCreateFromFile(BaseModel):
 
 class RefCandidateReview(BaseModel):
     notes: Optional[str] = None
+
+class TrayROIConfigUpdate(BaseModel):
+    points: List[List[float]]
+    source_size: Optional[List[int]] = None
+    output_size: Optional[List[int]] = None
 
 class PLUSelection(BaseModel):
     plu_code: str
@@ -1120,6 +1296,32 @@ async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> d
 async def root():
     return {"message": "Terazi AI System", "mode": SYSTEM_MODE}
 
+@api_router.get("/roi/config")
+async def get_roi_config():
+    cfg = _load_tray_roi(force_reload=True)
+    return {
+        "enabled": TRAY_ROI_ENABLE,
+        "strict": TRAY_ROI_STRICT,
+        "path": str(TRAY_ROI_PATH),
+        "exists": TRAY_ROI_PATH.exists(),
+        "config": cfg,
+    }
+
+@api_router.post("/roi/config")
+async def set_roi_config(payload: TrayROIConfigUpdate):
+    try:
+        cfg = _validate_tray_roi_config(payload.model_dump())
+        _save_tray_roi(cfg)
+        return {
+            "enabled": TRAY_ROI_ENABLE,
+            "strict": TRAY_ROI_STRICT,
+            "path": str(TRAY_ROI_PATH),
+            "exists": True,
+            "config": cfg,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid ROI config: {exc}")
+
 # PLU Management
 @api_router.post("/plu/create", response_model=PLUProduct)
 async def create_plu(input: PLUProductCreate):
@@ -1180,8 +1382,9 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
     if SYSTEM_MODE == "production":
         # Run AI analysis in background
         async def run_analysis():
+            processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
             start = time.monotonic()
-            result = await analyze_image_with_ai(image_base64, plu_obj)
+            result = await analyze_image_with_ai(processed_image_base64, plu_obj)
             elapsed_ms = (time.monotonic() - start) * 1000.0
             validation = ValidationResult(
                 plu_code=selection.plu_code,
@@ -1213,7 +1416,7 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
                 _schedule_bootstrap_update(
                     selection.plu_code,
                     result.get("embedding_vector"),
-                    image_base64,
+                    processed_image_base64,
                     None,
                     validation.id,
                 )
@@ -1341,9 +1544,10 @@ async def validate_sync(payload: ValidateSyncRequest):
                     filename = latest_path.name
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
+    processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
     # Run AI
     start = time.monotonic()
-    result = await analyze_image_with_ai(image_base64, plu_obj)
+    result = await analyze_image_with_ai(processed_image_base64, plu_obj)
     elapsed_ms = (time.monotonic() - start) * 1000.0
 
     # Persist validation result for traceability
@@ -1378,7 +1582,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         _schedule_bootstrap_update(
             payload.plu_code,
             result.get("embedding_vector"),
-            image_base64,
+            processed_image_base64,
             filename,
             validation.id,
         )
@@ -1468,8 +1672,9 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             error_count += 1
             continue
 
+        processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
         start_t = time.monotonic()
-        ai_result = await analyze_image_with_ai(image_base64, PLUProduct(**plu_product))
+        ai_result = await analyze_image_with_ai(processed_image_base64, PLUProduct(**plu_product))
         elapsed_ms = (time.monotonic() - start_t) * 1000.0
 
         validation = ValidationResult(
@@ -1506,7 +1711,7 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             _schedule_bootstrap_update(
                 expected_plu,
                 ai_result.get("embedding_vector"),
-                image_base64,
+                processed_image_base64,
                 filename,
                 validation.id,
             )
