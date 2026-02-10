@@ -408,6 +408,11 @@ class ValidationResult(BaseModel):
     plu_code: str
     selected_plu_name: str
     image_base64: str
+    processed_image_base64: Optional[str] = None
+    roi_applied: Optional[bool] = None
+    roi_reason: Optional[str] = None
+    roi_width: Optional[int] = None
+    roi_height: Optional[int] = None
     ai_analysis: str
     analysis_selected_plu: Optional[str] = None
     analysis_selected_score: Optional[str] = None
@@ -1390,6 +1395,11 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
                 plu_code=selection.plu_code,
                 selected_plu_name=plu_obj.name,
                 image_base64=image_base64,
+                processed_image_base64=processed_image_base64 if _roi_meta.get("roi_applied") else None,
+                roi_applied=bool(_roi_meta.get("roi_applied")),
+                roi_reason=str(_roi_meta.get("roi_reason", "")),
+                roi_width=int(_roi_meta["roi_width"]) if _roi_meta.get("roi_width") is not None else None,
+                roi_height=int(_roi_meta["roi_height"]) if _roi_meta.get("roi_height") is not None else None,
                 ai_analysis=result["analysis"],
                 analysis_selected_plu=result.get("analysis_selected_plu"),
                 analysis_selected_score=result.get("analysis_selected_score"),
@@ -1555,6 +1565,11 @@ async def validate_sync(payload: ValidateSyncRequest):
         plu_code=payload.plu_code,
         selected_plu_name=plu_obj.name,
         image_base64=image_base64,
+        processed_image_base64=processed_image_base64 if _roi_meta.get("roi_applied") else None,
+        roi_applied=bool(_roi_meta.get("roi_applied")),
+        roi_reason=str(_roi_meta.get("roi_reason", "")),
+        roi_width=int(_roi_meta["roi_width"]) if _roi_meta.get("roi_width") is not None else None,
+        roi_height=int(_roi_meta["roi_height"]) if _roi_meta.get("roi_height") is not None else None,
         ai_analysis=result["analysis"],
         analysis_selected_plu=result.get("analysis_selected_plu"),
         analysis_selected_score=result.get("analysis_selected_score"),
@@ -1601,6 +1616,10 @@ async def validate_sync(payload: ValidateSyncRequest):
         "ai_provider": AI_PROVIDER,
         "ai_model": AI_MODEL,
         "processing_ms": round(elapsed_ms, 2),
+        "roi_applied": bool(_roi_meta.get("roi_applied")),
+        "roi_reason": str(_roi_meta.get("roi_reason", "")),
+        "roi_width": _roi_meta.get("roi_width"),
+        "roi_height": _roi_meta.get("roi_height"),
         "timestamp": doc["timestamp"],
         "validation_id": validation.id,
         "filename": filename
@@ -1681,6 +1700,11 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             plu_code=expected_plu,
             selected_plu_name=plu_product["name"],
             image_base64=image_base64,
+            processed_image_base64=processed_image_base64 if _roi_meta.get("roi_applied") else None,
+            roi_applied=bool(_roi_meta.get("roi_applied")),
+            roi_reason=str(_roi_meta.get("roi_reason", "")),
+            roi_width=int(_roi_meta["roi_width"]) if _roi_meta.get("roi_width") is not None else None,
+            roi_height=int(_roi_meta["roi_height"]) if _roi_meta.get("roi_height") is not None else None,
             ai_analysis=ai_result.get("analysis", ""),
             analysis_selected_plu=ai_result.get("analysis_selected_plu"),
             analysis_selected_score=ai_result.get("analysis_selected_score"),
@@ -1777,6 +1801,11 @@ async def get_validation_results(limit: int = 50, skip: int = 0):
         if 'image_base64' in result:
             result['has_image'] = True
             del result['image_base64']
+        if 'processed_image_base64' in result:
+            result['has_processed_image'] = bool(result.get('processed_image_base64'))
+            del result['processed_image_base64']
+        if 'has_processed_image' not in result:
+            result['has_processed_image'] = False
         # Ensure AI metadata exists
         if 'ai_provider' not in result:
             result['ai_provider'] = None
