@@ -22,6 +22,7 @@ const Dashboard = () => {
   const [selectedRefCandidate, setSelectedRefCandidate] = useState(null);
   const [imageModalOpen, setImageModalOpen] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
+  const [modalImageMode, setModalImageMode] = useState("processed");
   const [imagesPage, setImagesPage] = useState(1);
   const [imagesLoading, setImagesLoading] = useState(false);
   const [validationsPage, setValidationsPage] = useState(1);
@@ -213,6 +214,7 @@ const Dashboard = () => {
   const handleImageClick = async (imageId) => {
     setLoadingImage(true);
     setImageModalOpen(true);
+    setModalImageMode("processed");
     setSelectedValidation(null);
     try {
       const response = await axios.get(`${API}/images/${imageId}`);
@@ -229,6 +231,7 @@ const Dashboard = () => {
   const handleValidationClick = async (validationId) => {
     setLoadingImage(true);
     setImageModalOpen(true);
+    setModalImageMode("processed");
     setSelectedImage(null);
     try {
       const response = await axios.get(`${API}/validation/${validationId}`);
@@ -244,6 +247,7 @@ const Dashboard = () => {
 
   const closeImageModal = () => {
     setImageModalOpen(false);
+    setModalImageMode("processed");
     setSelectedImage(null);
     setSelectedValidation(null);
     setSelectedRefCandidate(null);
@@ -252,6 +256,7 @@ const Dashboard = () => {
   const handleRefCandidateClick = (candidate) => {
     setLoadingImage(false);
     setImageModalOpen(true);
+    setModalImageMode("processed");
     setSelectedImage(null);
     setSelectedValidation(null);
     setSelectedRefCandidate(candidate);
@@ -518,6 +523,11 @@ const Dashboard = () => {
                     <p className="model-chip" data-testid={`validation-duration-${result.id}`}>
                       Süre: {result.processing_ms !== undefined && result.processing_ms !== null ? `${result.processing_ms} ms` : "-"}
                     </p>
+                    {result.has_processed_image && (
+                      <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
+                        ROI: crop kaydi var
+                      </p>
+                    )}
                     {(result.ai_provider === "local_gemini" || result.ai_provider === "local_gemini_consensus") && (
                       <div className="fallback-details">
                         <p className="model-chip" data-testid={`validation-local-${result.id}`}>
@@ -771,6 +781,13 @@ const Dashboard = () => {
                   const timestamp = rawTime ? new Date(rawTime).toLocaleString("tr-TR") : "-";
                   const phase = modalData?.phase;
                   const hasMatch = typeof modalData?.is_match === "boolean";
+                  const hasProcessedImage = Boolean(modalData?.processed_image_base64);
+                  const hasOriginalImage = Boolean(modalData?.image_base64);
+                  const canSwitchImage = hasProcessedImage && hasOriginalImage;
+                  const selectedBase64 =
+                    modalImageMode === "processed"
+                      ? (modalData?.processed_image_base64 || modalData?.image_base64 || null)
+                      : (modalData?.image_base64 || modalData?.processed_image_base64 || null);
                   return (
                     <>
                       <div className="modal-header">
@@ -789,9 +806,27 @@ const Dashboard = () => {
                       </div>
 
                       <div className="modal-image-container">
-                        {modalData?.image_base64 ? (
+                        {canSwitchImage && (
+                          <div className="modal-image-switch">
+                            <button
+                              type="button"
+                              className={`modal-image-switch-btn ${modalImageMode === "processed" ? "active" : ""}`}
+                              onClick={() => setModalImageMode("processed")}
+                            >
+                              Crop
+                            </button>
+                            <button
+                              type="button"
+                              className={`modal-image-switch-btn ${modalImageMode === "original" ? "active" : ""}`}
+                              onClick={() => setModalImageMode("original")}
+                            >
+                              Orijinal
+                            </button>
+                          </div>
+                        )}
+                        {selectedBase64 ? (
                           <img
-                            src={`data:image/jpeg;base64,${modalData.image_base64}`}
+                            src={`data:image/jpeg;base64,${selectedBase64}`}
                             alt={title}
                             className="modal-image"
                           />
@@ -803,6 +838,12 @@ const Dashboard = () => {
                       <div className="modal-info">
                         <p><strong>ID:</strong> {modalData?.id || "-"}</p>
                         <p><strong>Zaman:</strong> {timestamp}</p>
+                        <p>
+                          <strong>Goruntu:</strong>{" "}
+                          {modalImageMode === "processed"
+                            ? (hasProcessedImage ? "Crop" : "Orijinal")
+                            : (hasOriginalImage ? "Orijinal" : "Crop")}
+                        </p>
                       </div>
                     </>
                   );
