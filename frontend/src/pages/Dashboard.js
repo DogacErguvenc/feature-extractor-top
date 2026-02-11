@@ -46,6 +46,14 @@ const Dashboard = () => {
     return `${ms} ms`;
   };
 
+  const formatSimilarityPercent = (rawValue) => {
+    if (rawValue === null || rawValue === undefined || rawValue === "") return "-";
+    const num = Number(rawValue);
+    if (!Number.isFinite(num)) return "-";
+    const normalized = num <= 1 ? num * 100 : num;
+    return `${normalized.toFixed(1)}%`;
+  };
+
   useEffect(() => {
     fetchDashboardData();
   }, []);
@@ -523,6 +531,11 @@ const Dashboard = () => {
                     <p className="model-chip" data-testid={`validation-duration-${result.id}`}>
                       Süre: {result.processing_ms !== undefined && result.processing_ms !== null ? `${result.processing_ms} ms` : "-"}
                     </p>
+                    {!result.is_match && result.analysis_predicted_plu && (
+                      <p className="model-chip" data-testid={`validation-nearest-plu-${result.id}`}>
+                        En yakin PLU: {result.analysis_predicted_plu} ({formatSimilarityPercent(result.analysis_predicted_score)})
+                      </p>
+                    )}
                     {result.has_processed_image && (
                       <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
                         ROI: crop kaydi var
@@ -838,6 +851,11 @@ const Dashboard = () => {
                       <div className="modal-info">
                         <p><strong>ID:</strong> {modalData?.id || "-"}</p>
                         <p><strong>Zaman:</strong> {timestamp}</p>
+                        {!modalData?.is_match && modalData?.analysis_predicted_plu && (
+                          <p>
+                            <strong>En yakin PLU:</strong> {modalData.analysis_predicted_plu} ({formatSimilarityPercent(modalData.analysis_predicted_score)})
+                          </p>
+                        )}
                         <p>
                           <strong>Goruntu:</strong>{" "}
                           {modalImageMode === "processed"
