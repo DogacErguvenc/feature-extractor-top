@@ -655,7 +655,7 @@ const Dashboard = () => {
                       )}
                     </div>
                     <div className="candidate-actions">
-                      {refCandidatesStatus === "pending" && (
+                      {(refCandidatesStatus === "pending" || refCandidatesStatus === "rejected") && (
                         <>
                           <Button
                             variant="outline"

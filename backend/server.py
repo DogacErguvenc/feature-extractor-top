@@ -1955,6 +1955,7 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
         "status": "approved",
         "approved_at": datetime.now(timezone.utc).isoformat(),
         "approved_path": str(out_path),
+        "rejected_at": None,
     }
     if not added:
         update["notes"] = f"{update.get('notes', '')} | redundant_max_sim={max_sim:.4f}".strip()
@@ -1963,6 +1964,23 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
     await db.ref_candidates.update_one({"id": candidate_id}, {"$set": update})
     cand.update(update)
     cand["approved_at"] = datetime.fromisoformat(cand["approved_at"])
+    if BOOTSTRAP_ENABLE:
+        try:
+            img = decode_base64_to_pil(image_base64)
+            engine = get_embedding_engine()
+            vec = await asyncio.to_thread(engine.embed_image, img, True)
+            vec = vec.astype("float32")
+            await db.bootstrap_embeddings.insert_one({
+                "plu_code": plu_code,
+                "embedding": vec.tolist(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "filename": cand.get("original_filename"),
+                "source_validation_id": cand.get("source_validation_id"),
+                "status": "approved_manual",
+                "source_candidate_id": candidate_id,
+            })
+        except Exception as exc:
+            logging.error(f"Failed to add approved candidate to bootstrap pool for PLU {plu_code}: {exc}")
     return RefCandidate(**cand)
 
 
