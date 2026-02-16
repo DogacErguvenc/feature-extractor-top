@@ -71,6 +71,8 @@ BOOTSTRAP_USE_PROTOTYPES = os.environ.get('BOOTSTRAP_USE_PROTOTYPES', 'true').lo
 BOOTSTRAP_PROTOTYPE_K = int(os.environ.get('BOOTSTRAP_PROTOTYPE_K', '6'))
 BOOTSTRAP_SUPPORT_SIM = float(os.environ.get('BOOTSTRAP_SUPPORT_SIM', str(BOOTSTRAP_ACCEPT_SIM)))
 BOOTSTRAP_SUPPORT_COUNT = int(os.environ.get('BOOTSTRAP_SUPPORT_COUNT', '3'))
+BOOTSTRAP_FIXED_POOL_SIZE = int(os.environ.get('BOOTSTRAP_FIXED_POOL_SIZE', '100'))
+BOOTSTRAP_CLUSTER_K = int(os.environ.get('BOOTSTRAP_CLUSTER_K', str(BOOTSTRAP_PROTOTYPE_K)))
 CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
 CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
 PLU_MAX_EMBEDDINGS = int(os.environ.get('PLU_MAX_EMBEDDINGS', '200'))
@@ -377,6 +379,7 @@ LOCAL_MODEL_CACHE: dict[str, Tuple[ort.InferenceSession, str, List[dict]]] = {}
 EMBEDDING_ENGINE = None
 EMBEDDING_STORE = None
 EMBEDDING_STORE_LOCK = asyncio.Lock()
+BOOTSTRAP_POOL_LOCK = asyncio.Lock()
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -779,6 +782,11 @@ def _normalize_vec(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
+def _normalize_rows(mat: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12
+    return mat / norms
+
+
 def _farthest_point_sampling(embeddings: np.ndarray, k: int, seed_idx: Optional[int] = None) -> list[int]:
     n = embeddings.shape[0]
     if k >= n:
@@ -797,6 +805,82 @@ def _farthest_point_sampling(embeddings: np.ndarray, k: int, seed_idx: Optional[
         new_dist = 1.0 - (embeddings @ embeddings[idx])
         distances = np.minimum(distances, new_dist)
     return selected
+
+
+def _select_bootstrap_eviction_index(
+    entries: list[dict],
+    incoming_vec: np.ndarray,
+    cluster_k: int,
+) -> Optional[int]:
+    valid_indices: list[int] = []
+    vectors: list[np.ndarray] = []
+    for idx, item in enumerate(entries):
+        emb = item.get("embedding")
+        if emb:
+            arr = np.array(emb, dtype="float32")
+            if arr.ndim == 1 and arr.size > 0:
+                vectors.append(arr)
+                valid_indices.append(idx)
+    if not valid_indices:
+        return 0 if entries else None
+
+    mat = _normalize_rows(np.stack(vectors, axis=0))
+    vec = _normalize_vec(np.array(incoming_vec, dtype="float32"))
+    k = max(1, min(int(cluster_k), mat.shape[0]))
+    seed_idx = _farthest_point_sampling(mat, k)
+    centroids = mat[np.array(seed_idx, dtype=int)]
+    existing_assign = np.argmax(mat @ centroids.T, axis=1)
+    incoming_assign = int(np.argmax(centroids @ vec))
+    cluster_local = np.where(existing_assign == incoming_assign)[0]
+    if cluster_local.size == 0:
+        cluster_local = np.arange(mat.shape[0])
+    cluster_vecs = mat[cluster_local]
+    center = _normalize_vec(cluster_vecs.mean(axis=0))
+    farthest_local = int(np.argmin(cluster_vecs @ center))
+    victim_local = int(cluster_local[farthest_local])
+    return valid_indices[victim_local]
+
+
+async def _insert_bootstrap_embedding(
+    plu_code: str,
+    embedding_vec: np.ndarray,
+    status: str,
+    filename: Optional[str],
+    validation_id: Optional[str],
+    source_candidate_id: Optional[str] = None,
+) -> None:
+    doc = {
+        "plu_code": str(plu_code),
+        "embedding": _normalize_vec(np.array(embedding_vec, dtype="float32")).tolist(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "filename": filename,
+        "source_validation_id": validation_id,
+        "status": status,
+    }
+    if source_candidate_id:
+        doc["source_candidate_id"] = source_candidate_id
+
+    target = BOOTSTRAP_FIXED_POOL_SIZE
+    if target <= 0:
+        await db.bootstrap_embeddings.insert_one(doc)
+        return
+
+    async with BOOTSTRAP_POOL_LOCK:
+        cursor = db.bootstrap_embeddings.find(
+            {"plu_code": str(plu_code)},
+            {"_id": 1, "embedding": 1, "created_at": 1},
+        ).sort("created_at", -1)
+        entries = await cursor.to_list(None)
+        remove_needed = max(0, len(entries) - target + 1)
+        for _ in range(remove_needed):
+            victim_idx = _select_bootstrap_eviction_index(entries, embedding_vec, BOOTSTRAP_CLUSTER_K)
+            if victim_idx is None:
+                break
+            victim = entries.pop(victim_idx)
+            victim_id = victim.get("_id")
+            if victim_id is not None:
+                await db.bootstrap_embeddings.delete_one({"_id": victim_id})
+        await db.bootstrap_embeddings.insert_one(doc)
 
 
 async def _append_embedding_to_store(
@@ -896,14 +980,13 @@ async def _bootstrap_update(
     items = await cursor.to_list(BOOTSTRAP_MAX_POOL)
     pool = [np.array(item["embedding"], dtype="float32") for item in items if item.get("embedding")]
     if len(pool) < BOOTSTRAP_MIN_COUNT:
-        await db.bootstrap_embeddings.insert_one({
-            "plu_code": plu_code,
-            "embedding": embedding_vec.astype("float32").tolist(),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "filename": filename,
-            "source_validation_id": validation_id,
-            "status": "warmup",
-        })
+        await _insert_bootstrap_embedding(
+            plu_code=plu_code,
+            embedding_vec=embedding_vec,
+            status="warmup",
+            filename=filename,
+            validation_id=validation_id,
+        )
         return
 
     pool_mat = np.stack(pool, axis=0)
@@ -974,16 +1057,14 @@ async def _bootstrap_update(
     status = doc.get("status", status)
     await db.ref_candidates.insert_one(doc)
 
-    # Only add to pool if not rejected
     if status != "rejected":
-        await db.bootstrap_embeddings.insert_one({
-            "plu_code": plu_code,
-            "embedding": embedding_vec.astype("float32").tolist(),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "filename": filename,
-            "source_validation_id": validation_id,
-            "status": status,
-        })
+        await _insert_bootstrap_embedding(
+            plu_code=plu_code,
+            embedding_vec=embedding_vec,
+            status=status,
+            filename=filename,
+            validation_id=validation_id,
+        )
 
 
 def _schedule_bootstrap_update(
@@ -1970,15 +2051,14 @@ async def approve_ref_candidate(candidate_id: str, payload: RefCandidateReview =
             engine = get_embedding_engine()
             vec = await asyncio.to_thread(engine.embed_image, img, True)
             vec = vec.astype("float32")
-            await db.bootstrap_embeddings.insert_one({
-                "plu_code": plu_code,
-                "embedding": vec.tolist(),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "filename": cand.get("original_filename"),
-                "source_validation_id": cand.get("source_validation_id"),
-                "status": "approved_manual",
-                "source_candidate_id": candidate_id,
-            })
+            await _insert_bootstrap_embedding(
+                plu_code=plu_code,
+                embedding_vec=vec,
+                status="approved_manual",
+                filename=cand.get("original_filename"),
+                validation_id=cand.get("source_validation_id"),
+                source_candidate_id=candidate_id,
+            )
         except Exception as exc:
             logging.error(f"Failed to add approved candidate to bootstrap pool for PLU {plu_code}: {exc}")
     return RefCandidate(**cand)
