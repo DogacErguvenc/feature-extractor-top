@@ -84,6 +84,9 @@ backend/models/*.safetensors
 # Build caches
 .cache/
 
+# Project docs (specific)
+TERAZI_SIFIRDAN_KURULUM_DOKUMANI.md
+
 # Mobile development
 android-sdk/ -e 
 # Environment files
