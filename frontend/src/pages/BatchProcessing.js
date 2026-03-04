@@ -12,6 +12,26 @@ const detectPluFromName = (name = "") => {
   return match ? match[1] : "";
 };
 
+const formatTopMatchScore = (match) => {
+  const raw = Number(match?.score);
+  if (!Number.isFinite(raw)) return "-";
+  if (match?.score_type === "cosine_similarity") {
+    return raw.toFixed(4);
+  }
+  return `${raw.toFixed(1)}%`;
+};
+
+const summarizeTopMatches = (matches) => {
+  if (!Array.isArray(matches) || matches.length === 0) return "-";
+  return matches
+    .slice(0, 3)
+    .map((match, idx) => {
+      const rank = match?.rank ?? idx + 1;
+      return `${rank}. ${match?.plu_code || "?"} (${formatTopMatchScore(match)})`;
+    })
+    .join(" | ");
+};
+
 const formatSize = (size) => {
   if (!size) return "-";
   if (size < 1024) return `${size} B`;
@@ -369,6 +389,11 @@ const BatchProcessing = () => {
                         ? item.error
                         : item.result?.analysis || "Analiz sonucu bekleniyor."}
                     </p>
+                    {!item.error && Array.isArray(item.result?.top_matches) && item.result.top_matches.length > 0 && (
+                      <p className="analysis-text">
+                        Top 3 benzer: {summarizeTopMatches(item.result.top_matches)}
+                      </p>
+                    )}
                   </div>
                   <div className="result-meta">
                     <span className={`result-badge ${item.status}`}>

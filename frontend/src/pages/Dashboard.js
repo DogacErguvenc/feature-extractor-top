@@ -54,6 +54,28 @@ const Dashboard = () => {
     return `${normalized.toFixed(1)}%`;
   };
 
+  const formatTopMatchScore = (match) => {
+    if (!match) return "-";
+    const raw = Number(match.score);
+    if (!Number.isFinite(raw)) return "-";
+    if (match.score_type === "cosine_similarity") {
+      return raw.toFixed(4);
+    }
+    return `${raw.toFixed(1)}%`;
+  };
+
+  const summarizeTopMatches = (matches) => {
+    if (!Array.isArray(matches) || matches.length === 0) return "-";
+    return matches
+      .slice(0, 3)
+      .map((match, idx) => {
+        const rank = match?.rank ?? idx + 1;
+        const pluCode = match?.plu_code || "?";
+        return `${rank}. ${pluCode} (${formatTopMatchScore(match)})`;
+      })
+      .join(" | ");
+  };
+
   useEffect(() => {
     fetchDashboardData();
   }, []);
@@ -536,6 +558,11 @@ const Dashboard = () => {
                         En yakin PLU: {result.analysis_predicted_plu} ({formatSimilarityPercent(result.analysis_predicted_score)})
                       </p>
                     )}
+                    {Array.isArray(result.top_matches) && result.top_matches.length > 0 && (
+                      <p className="model-chip" data-testid={`validation-top-matches-${result.id}`}>
+                        Top 3 benzer: {summarizeTopMatches(result.top_matches)}
+                      </p>
+                    )}
                     {result.has_processed_image && (
                       <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
                         ROI: crop kaydi var
@@ -854,6 +881,11 @@ const Dashboard = () => {
                         {!modalData?.is_match && modalData?.analysis_predicted_plu && (
                           <p>
                             <strong>En yakin PLU:</strong> {modalData.analysis_predicted_plu} ({formatSimilarityPercent(modalData.analysis_predicted_score)})
+                          </p>
+                        )}
+                        {Array.isArray(modalData?.top_matches) && modalData.top_matches.length > 0 && (
+                          <p>
+                            <strong>Top 3 benzer:</strong> {summarizeTopMatches(modalData.top_matches)}
                           </p>
                         )}
                         <p>

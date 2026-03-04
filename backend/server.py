@@ -423,6 +423,7 @@ class ValidationResult(BaseModel):
     analysis_predicted_plu: Optional[str] = None
     analysis_predicted_score: Optional[str] = None
     analysis_embedding_count: Optional[str] = None
+    top_matches: Optional[List[dict]] = None
     is_match: bool
     confidence: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -765,6 +766,84 @@ def _stringify_response(payload: dict) -> dict:
     return {key: _stringify_value(val) for key, val in payload.items()}
 
 
+def _build_local_top_matches(labels: List[dict], probs: np.ndarray, top_n: int = 3) -> List[dict]:
+    if probs.ndim != 1:
+        probs = np.array(probs).reshape(-1)
+    limit = min(max(0, int(top_n)), int(probs.shape[0]), len(labels))
+    if limit <= 0:
+        return []
+
+    top_indices = np.argsort(probs)[-limit:][::-1]
+    matches: List[dict] = []
+    for rank, idx in enumerate(top_indices, start=1):
+        label = labels[int(idx)] if int(idx) < len(labels) else {}
+        plu_code = str(
+            label.get("plu_code")
+            or label.get("id")
+            or label.get("code")
+            or label.get("label")
+            or ""
+        )
+        plu_name = str(label.get("name") or label.get("label") or plu_code)
+        score = round(float(probs[int(idx)]) * 100.0, 2)
+        matches.append(
+            {
+                "rank": rank,
+                "plu_code": plu_code,
+                "plu_name": plu_name,
+                "score": score,
+                "score_type": "probability_pct",
+            }
+        )
+    return matches
+
+
+def _build_embedding_top_matches(store, query_embeddings: np.ndarray, top_k: int = 3, top_n: int = 3) -> List[dict]:
+    if query_embeddings.ndim == 1:
+        query_embeddings = query_embeddings[None, :]
+    sims = query_embeddings @ store.embeddings.T
+    sims = sims.max(axis=0)
+
+    plu_name_map: dict[str, str] = {}
+    for item in store.meta:
+        plu_code = str(item.get("plu_code") or "")
+        if not plu_code or plu_code in plu_name_map:
+            continue
+        plu_name = str(item.get("plu_name") or "").strip()
+        if plu_name:
+            plu_name_map[plu_code] = plu_name
+
+    scores: list[tuple[str, float]] = []
+    k_hint = max(1, int(top_k))
+    for plu_code, indices in store.plu_index.items():
+        idx_arr = np.array(indices, dtype=int)
+        if idx_arr.size == 0:
+            continue
+        values = sims[idx_arr]
+        k = min(k_hint, values.size)
+        if k == 1:
+            score = float(values.max())
+        else:
+            top_idx = np.argpartition(values, -k)[-k:]
+            score = float(values[top_idx].mean())
+        scores.append((str(plu_code), score))
+
+    scores.sort(key=lambda item: item[1], reverse=True)
+    limit = min(max(0, int(top_n)), len(scores))
+    matches: List[dict] = []
+    for rank, (plu_code, score) in enumerate(scores[:limit], start=1):
+        matches.append(
+            {
+                "rank": rank,
+                "plu_code": plu_code,
+                "plu_name": plu_name_map.get(plu_code, plu_code),
+                "score": round(score, 4),
+                "score_type": "cosine_similarity",
+            }
+        )
+    return matches
+
+
 def _save_base64_image(target_dir: Path, filename_hint: Optional[str], image_base64: str) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     image_bytes = base64.b64decode(image_base64)
@@ -1089,6 +1168,9 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
     store = get_embedding_store()
     img = decode_base64_to_pil(image_base64)
     query_embeddings = await asyncio.to_thread(engine.extract_embeddings, img, True)
+    top_matches = await asyncio.to_thread(
+        _build_embedding_top_matches, store, query_embeddings, EMBEDDING_TOP_K, 3
+    )
     # Build a single vector for bootstrap usage
     vec = query_embeddings.mean(axis=0)
     vec = vec / (np.linalg.norm(vec) + 1e-12)
@@ -1109,6 +1191,7 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
             "is_match": False,
             "confidence": 0.0,
             "embedding_vector": vec.astype("float32"),
+            "top_matches": top_matches,
         }
     analysis_detail = {
         "selected_plu": str(plu_product.plu_code),
@@ -1137,6 +1220,7 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
         "embedding_vector": vec.astype("float32"),
         "is_match": result["is_match"],
         "confidence": result["confidence"],
+        "top_matches": top_matches,
     }
 async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_key: str = "local") -> dict:
     """Run offline ONNX model and return uniform result dict."""
@@ -1145,6 +1229,7 @@ async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_
     outputs = await asyncio.to_thread(session.run, None, {input_name: input_tensor})
     logits = outputs[0][0]  # assuming (1, num_classes)
     probs = softmax(logits)
+    top_matches = _build_local_top_matches(labels, probs, top_n=3)
     top_idx = int(np.argmax(probs))
     pred_label = labels[top_idx]
     pred_plu = str(pred_label.get("plu_code"))
@@ -1164,7 +1249,8 @@ async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_
     return {
         "analysis": response_text,
         "is_match": pred_plu == selected_plu,
-        "confidence": round(selected_conf, 2)
+        "confidence": round(selected_conf, 2),
+        "top_matches": top_matches,
     }
 
 def build_gemini_prompt(plu_product: PLUProduct) -> str:
@@ -1488,6 +1574,7 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
                 analysis_predicted_plu=result.get("analysis_predicted_plu"),
                 analysis_predicted_score=result.get("analysis_predicted_score"),
                 analysis_embedding_count=result.get("analysis_embedding_count"),
+                top_matches=result.get("top_matches"),
                 is_match=result["is_match"],
                 confidence=result["confidence"],
                 ai_provider=AI_PROVIDER,
@@ -1658,6 +1745,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         analysis_predicted_plu=result.get("analysis_predicted_plu"),
         analysis_predicted_score=result.get("analysis_predicted_score"),
         analysis_embedding_count=result.get("analysis_embedding_count"),
+        top_matches=result.get("top_matches"),
         is_match=result["is_match"],
         confidence=result["confidence"],
         ai_provider=AI_PROVIDER,
@@ -1694,6 +1782,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         "analysis_predicted_plu": result.get("analysis_predicted_plu"),
         "analysis_predicted_score": result.get("analysis_predicted_score"),
         "analysis_embedding_count": result.get("analysis_embedding_count"),
+        "top_matches": result.get("top_matches"),
         "ai_provider": AI_PROVIDER,
         "ai_model": AI_MODEL,
         "processing_ms": round(elapsed_ms, 2),
@@ -1793,6 +1882,7 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             analysis_predicted_plu=ai_result.get("analysis_predicted_plu"),
             analysis_predicted_score=ai_result.get("analysis_predicted_score"),
             analysis_embedding_count=ai_result.get("analysis_embedding_count"),
+            top_matches=ai_result.get("top_matches"),
             is_match=ai_result.get("is_match", False),
             confidence=ai_result.get("confidence", 0.0),
             ai_provider=AI_PROVIDER,
@@ -1833,6 +1923,7 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             "analysis_predicted_plu": ai_result.get("analysis_predicted_plu"),
             "analysis_predicted_score": ai_result.get("analysis_predicted_score"),
             "analysis_embedding_count": ai_result.get("analysis_embedding_count"),
+            "top_matches": ai_result.get("top_matches"),
             "processing_ms": round(elapsed_ms, 2),
             "ai_provider": AI_PROVIDER,
             "ai_model": AI_MODEL,
@@ -1906,6 +1997,8 @@ async def get_validation_results(limit: int = 50, skip: int = 0):
             result['fallback_remote_confidence'] = None
         if 'reference_count' not in result:
             result['reference_count'] = None
+        if 'top_matches' not in result:
+            result['top_matches'] = None
     return results
 
 # Get single validation result with full data
