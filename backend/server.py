@@ -492,6 +492,12 @@ class ValidateSyncRequest(BaseModel):
     file_name: Optional[str] = None
     file_path: Optional[str] = None
 
+class LiveValidateRequest(BaseModel):
+    plu_code: str
+    camera_index: int = 0
+    persist_capture: bool = False
+    persist_validation: bool = False
+
 class BatchValidationMeta(BaseModel):
     filename: str
     plu_code: str
@@ -520,16 +526,16 @@ class HealthStatus(BaseModel):
     disk_percent: float
 
 # Helper function to capture image from camera
-def capture_image_from_camera() -> Optional[str]:
+def capture_image_from_camera(camera_index: int = 0, warmup_frames: int = 5) -> Optional[str]:
     """Capture image from default camera and return as base64 string"""
     try:
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
             logging.error("Cannot open camera")
             return None
         
         # Wait a bit for camera to initialize
-        for _ in range(5):
+        for _ in range(max(0, int(warmup_frames))):
             cap.read()
         
         ret, frame = cap.read()
@@ -1621,6 +1627,113 @@ async def test_camera():
     if not image_base64:
         raise HTTPException(status_code=500, detail="Camera not available or failed to capture image")
     return {"message": "Camera test successful", "image_preview": image_base64[:100] + "..."}
+
+@api_router.post("/live/validate")
+async def live_validate(payload: LiveValidateRequest):
+    """Capture one live frame and return immediate AI validation output."""
+    plu_product = await db.plu_products.find_one({"plu_code": payload.plu_code}, {"_id": 0})
+    if not plu_product:
+        raise HTTPException(status_code=404, detail="PLU not found")
+    if isinstance(plu_product.get("created_at"), str):
+        plu_product["created_at"] = datetime.fromisoformat(plu_product["created_at"])
+    plu_obj = PLUProduct(**plu_product)
+
+    image_base64 = capture_image_from_camera(camera_index=payload.camera_index, warmup_frames=0)
+    if not image_base64:
+        raise HTTPException(status_code=500, detail="Camera not available or failed to capture image")
+
+    captured_image_id = None
+    if payload.persist_capture:
+        captured_img = CapturedImage(
+            plu_code=payload.plu_code,
+            image_base64=image_base64,
+            phase=SYSTEM_MODE,
+            ai_provider=AI_PROVIDER,
+            ai_model=AI_MODEL,
+        )
+        captured_doc = captured_img.model_dump()
+        captured_doc["timestamp"] = captured_doc["timestamp"].isoformat()
+        await db.captured_images.insert_one(captured_doc)
+        captured_image_id = captured_img.id
+
+    processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
+
+    start = time.monotonic()
+    result = await analyze_image_with_ai(processed_image_base64, plu_obj)
+    elapsed_ms = (time.monotonic() - start) * 1000.0
+
+    validation_id = None
+    if payload.persist_validation:
+        validation = ValidationResult(
+            plu_code=payload.plu_code,
+            selected_plu_name=plu_obj.name,
+            image_base64=image_base64,
+            processed_image_base64=processed_image_base64 if _roi_meta.get("roi_applied") else None,
+            roi_applied=bool(_roi_meta.get("roi_applied")),
+            roi_reason=str(_roi_meta.get("roi_reason", "")),
+            roi_width=int(_roi_meta["roi_width"]) if _roi_meta.get("roi_width") is not None else None,
+            roi_height=int(_roi_meta["roi_height"]) if _roi_meta.get("roi_height") is not None else None,
+            ai_analysis=result.get("analysis", ""),
+            analysis_selected_plu=result.get("analysis_selected_plu"),
+            analysis_selected_score=result.get("analysis_selected_score"),
+            analysis_best_other_score=result.get("analysis_best_other_score"),
+            analysis_predicted_plu=result.get("analysis_predicted_plu"),
+            analysis_predicted_score=result.get("analysis_predicted_score"),
+            analysis_embedding_count=result.get("analysis_embedding_count"),
+            top_matches=result.get("top_matches"),
+            is_match=bool(result.get("is_match", False)),
+            confidence=float(result.get("confidence", 0.0)),
+            ai_provider=AI_PROVIDER,
+            ai_model=AI_MODEL,
+            processing_ms=round(elapsed_ms, 2),
+            fallback_local_match=result.get("fallback_local_match"),
+            fallback_local_confidence=result.get("fallback_local_confidence"),
+            fallback_remote_provider=result.get("fallback_remote_provider"),
+            fallback_remote_match=result.get("fallback_remote_match"),
+            fallback_remote_confidence=result.get("fallback_remote_confidence"),
+            reference_count=result.get("reference_count"),
+            source="live_validate",
+        )
+        validation_doc = validation.model_dump()
+        validation_doc["timestamp"] = validation_doc["timestamp"].isoformat()
+        await db.validation_results.insert_one(validation_doc)
+        validation_id = validation.id
+
+        if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
+            _schedule_bootstrap_update(
+                payload.plu_code,
+                result.get("embedding_vector"),
+                processed_image_base64,
+                None,
+                validation.id,
+            )
+
+    return {
+        "plu_code": payload.plu_code,
+        "plu_name": plu_obj.name,
+        "is_match": bool(result.get("is_match", False)),
+        "confidence": float(result.get("confidence", 0.0)),
+        "analysis": result.get("analysis", ""),
+        "analysis_selected_plu": result.get("analysis_selected_plu"),
+        "analysis_selected_score": result.get("analysis_selected_score"),
+        "analysis_best_other_score": result.get("analysis_best_other_score"),
+        "analysis_predicted_plu": result.get("analysis_predicted_plu"),
+        "analysis_predicted_score": result.get("analysis_predicted_score"),
+        "analysis_embedding_count": result.get("analysis_embedding_count"),
+        "top_matches": result.get("top_matches"),
+        "ai_provider": AI_PROVIDER,
+        "ai_model": AI_MODEL,
+        "processing_ms": round(elapsed_ms, 2),
+        "roi_applied": bool(_roi_meta.get("roi_applied")),
+        "roi_reason": str(_roi_meta.get("roi_reason", "")),
+        "roi_width": _roi_meta.get("roi_width"),
+        "roi_height": _roi_meta.get("roi_height"),
+        "captured_image_id": captured_image_id,
+        "validation_id": validation_id,
+        "image_base64": image_base64,
+        "processed_image_base64": processed_image_base64 if _roi_meta.get("roi_applied") else None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 # Get captured images
 @api_router.get("/images/captured")
