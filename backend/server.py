@@ -37,7 +37,7 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 # Choose which AI provider to use
-# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_embedding', 'local_gemini', 'local_gemini_consensus'
+# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_embedding', 'butcher_resnet', 'local_gemini', 'local_gemini_consensus'
 AI_PROVIDER = os.environ.get('AI_PROVIDER', 'gemini')
 AI_MODEL = os.environ.get('AI_MODEL', 'gemini-2.0-flash')  # Model name
 LOCAL_MODEL_PATH = Path(os.environ.get('LOCAL_MODEL_PATH', ROOT_DIR / "models" / "local_model.onnx"))
@@ -46,6 +46,8 @@ LOCAL_LARGE_MODEL_PATH = Path(os.environ.get('LOCAL_LARGE_MODEL_PATH', ROOT_DIR 
 LOCAL_LARGE_LABELS_PATH = Path(os.environ.get('LOCAL_LARGE_LABELS_PATH', ROOT_DIR / "models" / "local_labels_large.json"))
 LOCAL_SMALL_IMAGE_SIZE = int(os.environ.get('LOCAL_SMALL_IMAGE_SIZE', '224'))
 LOCAL_LARGE_IMAGE_SIZE = int(os.environ.get('LOCAL_LARGE_IMAGE_SIZE', '300'))
+BUTCHER_CONFIG_PATH = Path(os.environ.get('BUTCHER_CONFIG_PATH', ROOT_DIR / "butcher_config.yaml")).resolve()
+BUTCHER_TOP_K = int(os.environ.get('BUTCHER_TOP_K', '3'))
 REFERENCE_IMAGE_DIR = Path(os.environ.get('REFERENCE_IMAGE_DIR', ROOT_DIR / "reference_images")).resolve()
 REFERENCE_MAX_IMAGES = int(os.environ.get('REFERENCE_MAX_IMAGES', '2'))
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'dense_v1')
@@ -804,6 +806,26 @@ def _build_local_top_matches(labels: List[dict], probs: np.ndarray, top_n: int =
     return matches
 
 
+def _normalize_label(value: Optional[str]) -> str:
+    return str(value or "").strip().lower()
+
+
+def _resolve_selected_prob(class_probs: dict[str, float], plu_product: PLUProduct) -> tuple[Optional[float], Optional[str]]:
+    selected_candidates = [
+        str(plu_product.plu_code),
+        str(plu_product.name),
+    ]
+    normalized_to_raw = {
+        _normalize_label(raw): raw
+        for raw in class_probs.keys()
+    }
+    for candidate in selected_candidates:
+        key = normalized_to_raw.get(_normalize_label(candidate))
+        if key is not None:
+            return float(class_probs[key]), str(key)
+    return None, None
+
+
 def _build_embedding_top_matches(store, query_embeddings: np.ndarray, top_k: int = 3, top_n: int = 3) -> List[dict]:
     if query_embeddings.ndim == 1:
         query_embeddings = query_embeddings[None, :]
@@ -1259,6 +1281,56 @@ async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_
         "top_matches": top_matches,
     }
 
+
+async def run_butcher_resnet_inference(image_base64: str, plu_product: PLUProduct) -> dict:
+    """
+    butcher-vision mantığıyla ResNet18 checkpoint inference.
+    Config + best.pth + class_to_idx.json kullanır.
+    """
+    from butcher_runtime import predict_base64_image
+
+    result = await asyncio.to_thread(
+        predict_base64_image,
+        image_base64,
+        BUTCHER_CONFIG_PATH,
+        BUTCHER_TOP_K,
+    )
+    top_matches = result.get("top_matches", [])
+    class_probs = result.get("class_probs", {})
+    predicted_class = str(result.get("predicted_class", ""))
+    predicted_prob = float(result.get("predicted_prob", 0.0))
+
+    selected_prob, selected_class = _resolve_selected_prob(class_probs, plu_product)
+    if selected_prob is None:
+        selected_prob = predicted_prob
+        selected_class = predicted_class
+
+    predicted_norm = _normalize_label(predicted_class)
+    selected_norm_candidates = {
+        _normalize_label(str(plu_product.plu_code)),
+        _normalize_label(str(plu_product.name)),
+    }
+    is_match = predicted_norm in selected_norm_candidates
+    selected_conf = float(selected_prob) * 100.0
+
+    analysis = (
+        f"Butcher ResNet18 prediction: {predicted_class}, "
+        f"predicted_prob={predicted_prob:.3f}, "
+        f"selected_class={selected_class}, selected_prob={float(selected_prob):.3f}."
+    )
+    return {
+        "analysis": analysis,
+        "analysis_selected_plu": str(selected_class or plu_product.plu_code),
+        "analysis_selected_score": f"{float(selected_prob):.3f}",
+        "analysis_best_other_score": "",
+        "analysis_predicted_plu": predicted_class,
+        "analysis_predicted_score": f"{predicted_prob:.3f}",
+        "analysis_embedding_count": "",
+        "is_match": is_match,
+        "confidence": round(selected_conf, 2),
+        "top_matches": top_matches,
+    }
+
 def build_gemini_prompt(plu_product: PLUProduct) -> str:
     """Construct a strict, deterministic prompt for Gemini."""
     return (
@@ -1391,10 +1463,14 @@ async def run_remote_inference(provider: str, model_name: str, image_base64: str
 
 # AI Analysis function
 async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> dict:
-    """Analyze image using configured AI provider (local, gemini, openai, or local+gemini fallback)."""
+    """Analyze image using configured AI provider."""
     try:
         provider = AI_PROVIDER
         model_name = AI_MODEL
+
+        # 0) Butcher-style ResNet18 classifier
+        if provider == 'butcher_resnet':
+            return await run_butcher_resnet_inference(image_base64, plu_product)
 
         # 1) Only local (small)
         if provider == 'local':
@@ -2330,6 +2406,7 @@ async def update_ai_config(config: AIConfigUpdate):
         "local",
         "local_large",
         "local_embedding",
+        "butcher_resnet",
         "local_gemini",
         "local_gemini_consensus",
     }
@@ -2337,7 +2414,7 @@ async def update_ai_config(config: AIConfigUpdate):
         raise HTTPException(status_code=400, detail=f"Provider must be one of {allowed}")
     AI_PROVIDER = config.provider
     # Normalize model choice based on provider
-    if AI_PROVIDER in {"local", "local_large", "local_embedding"}:
+    if AI_PROVIDER in {"local", "local_large", "local_embedding", "butcher_resnet"}:
         AI_MODEL = ""
     elif AI_PROVIDER in {"gemini", "local_gemini", "local_gemini_consensus"}:
         AI_MODEL = config.model if config.model is not None else "gemini-2.5-flash-lite"

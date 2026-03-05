@@ -215,7 +215,12 @@ const Dashboard = () => {
   };
 
   const handleProviderChange = (provider) => {
-    if (provider === "local" || provider === "local_large" || provider === "local_embedding") {
+    if (
+      provider === "local" ||
+      provider === "local_large" ||
+      provider === "local_embedding" ||
+      provider === "butcher_resnet"
+    ) {
       setAiConfig({ provider, model: "" });
     } else if (
       provider === "gemini" ||
@@ -353,6 +358,7 @@ const Dashboard = () => {
               <option value="local">Local (ONNX)</option>
               <option value="local_large">Local (Large ONNX)</option>
               <option value="local_embedding">Local (Embedding)</option>
+              <option value="butcher_resnet">Butcher ResNet18 (Birebir)</option>
               <option value="local_gemini">Local + Gemini (fallback)</option>
               <option value="local_gemini_consensus">Local + Gemini (consensus)</option>
               <option value="gemini">Gemini</option>

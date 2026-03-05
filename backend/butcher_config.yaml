@@ -1,0 +1,18 @@
+experiment_name: butcher_resnet18
+model_root: models
+
+model:
+  backbone_name: resnet18
+  pretrained: true
+
+data:
+  root_dir: ../datasets_roi
+  img_size: 224
+  num_workers: 2
+
+train:
+  batch_size: 32
+  num_epochs: 10
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  device: cpu
