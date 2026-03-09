@@ -15,4 +15,4 @@ train:
   num_epochs: 10
   lr: 1.0e-3
   weight_decay: 1.0e-4
-  device: cpu
+  device: cuda
