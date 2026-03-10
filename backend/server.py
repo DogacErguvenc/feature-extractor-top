@@ -500,6 +500,10 @@ class LiveValidateRequest(BaseModel):
     persist_capture: bool = False
     persist_validation: bool = False
 
+class LivePredictRequest(BaseModel):
+    image_base64: Optional[str] = None
+    camera_index: int = 0
+
 class BatchValidationMeta(BaseModel):
     filename: str
     plu_code: str
@@ -1806,6 +1810,68 @@ async def live_validate(payload: LiveValidateRequest):
         "roi_height": _roi_meta.get("roi_height"),
         "captured_image_id": captured_image_id,
         "validation_id": validation_id,
+        "image_base64": image_base64,
+        "processed_image_base64": processed_image_base64 if _roi_meta.get("roi_applied") else None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+@api_router.post("/live/predict")
+async def live_predict(payload: LivePredictRequest):
+    """Live top-3 prediction without requiring a selected PLU."""
+    supported_live_providers = {"local", "local_large", "local_embedding", "butcher_resnet"}
+    if AI_PROVIDER not in supported_live_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Live prediction supports only local/local_large/local_embedding/"
+                "butcher_resnet providers. Current provider: "
+                f"{AI_PROVIDER}"
+            ),
+        )
+
+    image_base64 = payload.image_base64
+    if not image_base64:
+        image_base64 = capture_image_from_camera(camera_index=payload.camera_index, warmup_frames=0)
+    if not image_base64:
+        raise HTTPException(status_code=500, detail="Camera not available or failed to capture image")
+
+    processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
+    probe_plu = PLUProduct(
+        plu_code="__live__",
+        name="__live__",
+        description="live prediction placeholder",
+    )
+
+    start = time.monotonic()
+    result = await analyze_image_with_ai(processed_image_base64, probe_plu)
+    elapsed_ms = (time.monotonic() - start) * 1000.0
+
+    top_matches = result.get("top_matches")
+    if not isinstance(top_matches, list):
+        top_matches = []
+    top_matches = top_matches[:3]
+
+    predicted_plu = result.get("analysis_predicted_plu")
+    predicted_score = result.get("analysis_predicted_score")
+    if not predicted_plu and top_matches:
+        predicted_plu = str(top_matches[0].get("plu_code") or "")
+    if not predicted_score and top_matches:
+        score = top_matches[0].get("score")
+        predicted_score = str(score) if score is not None else None
+
+    return {
+        "analysis": result.get("analysis", ""),
+        "top_matches": top_matches,
+        "analysis_predicted_plu": predicted_plu,
+        "analysis_predicted_score": predicted_score,
+        "confidence": float(result.get("confidence", 0.0)),
+        "ai_provider": AI_PROVIDER,
+        "ai_model": AI_MODEL,
+        "processing_ms": round(elapsed_ms, 2),
+        "roi_applied": bool(_roi_meta.get("roi_applied")),
+        "roi_reason": str(_roi_meta.get("roi_reason", "")),
+        "roi_width": _roi_meta.get("roi_width"),
+        "roi_height": _roi_meta.get("roi_height"),
         "image_base64": image_base64,
         "processed_image_base64": processed_image_base64 if _roi_meta.get("roi_applied") else None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
