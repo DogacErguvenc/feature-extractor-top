@@ -494,6 +494,13 @@ class ValidateSyncRequest(BaseModel):
     file_name: Optional[str] = None
     file_path: Optional[str] = None
 
+class ResnetTopKSyncRequest(BaseModel):
+    image_base64: Optional[str] = None
+    filename: Optional[str] = None
+    file_name: Optional[str] = None
+    file_path: Optional[str] = None
+    top_k: int = 5
+
 class LiveValidateRequest(BaseModel):
     plu_code: str
     camera_index: int = 0
@@ -1920,6 +1927,100 @@ async def get_image(image_id: str):
         image['timestamp'] = datetime.fromisoformat(image['timestamp'])
     return image
 
+# ResNet-only synchronous top-k prediction for VB file-based integration
+@api_router.post("/resnet/topk-sync")
+async def resnet_topk_sync(payload: ResnetTopKSyncRequest):
+    image_base64 = None
+    filename = payload.file_name or payload.filename
+
+    if payload.file_path:
+        file_path = Path(payload.file_path)
+        if not file_path.is_absolute():
+            file_path = ALLOWED_IMAGE_DIR / file_path
+        safe_path = resolve_safe_path(file_path)
+        if not safe_path.exists():
+            raise HTTPException(status_code=400, detail=f"File not found: {safe_path}")
+        try:
+            file_bytes = safe_path.read_bytes()
+            image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            if not filename:
+                filename = safe_path.name
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+
+    if not image_base64 and payload.image_base64:
+        image_base64 = payload.image_base64
+
+    if not image_base64:
+        if filename:
+            file_path = ALLOWED_IMAGE_DIR / filename
+            safe_path = resolve_safe_path(file_path)
+            if not safe_path.exists():
+                raise HTTPException(status_code=400, detail=f"File not found: {safe_path}")
+            try:
+                file_bytes = safe_path.read_bytes()
+                image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+        else:
+            latest_path = get_latest_image_path(ALLOWED_IMAGE_DIR)
+            try:
+                file_bytes = latest_path.read_bytes()
+                image_base64 = base64.b64encode(file_bytes).decode("utf-8")
+                if not filename:
+                    filename = latest_path.name
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
+
+    processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
+    top_k = min(max(1, int(payload.top_k)), 20)
+
+    from butcher_runtime import predict_base64_image
+
+    start = time.monotonic()
+    result = await asyncio.to_thread(
+        predict_base64_image,
+        processed_image_base64,
+        BUTCHER_CONFIG_PATH,
+        top_k,
+    )
+    elapsed_ms = (time.monotonic() - start) * 1000.0
+
+    top_matches = result.get("top_matches")
+    if not isinstance(top_matches, list):
+        top_matches = []
+    top_matches = top_matches[:top_k]
+
+    top_plu_codes: List[str] = []
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code:
+            top_plu_codes.append(code)
+
+    predicted_plu = str(
+        result.get("predicted_class")
+        or (top_plu_codes[0] if top_plu_codes else "")
+    )
+    predicted_prob = float(result.get("predicted_prob", 0.0))
+
+    return {
+        "top_k": top_k,
+        "top_plu_codes": top_plu_codes,
+        "top_plu_codes_csv": ",".join(top_plu_codes),
+        "top_matches": top_matches,
+        "analysis_predicted_plu": predicted_plu,
+        "analysis_predicted_score": f"{predicted_prob:.3f}",
+        "ai_provider": "butcher_resnet",
+        "ai_model": "",
+        "processing_ms": round(elapsed_ms, 2),
+        "roi_applied": bool(_roi_meta.get("roi_applied")),
+        "roi_reason": str(_roi_meta.get("roi_reason", "")),
+        "roi_width": _roi_meta.get("roi_width"),
+        "roi_height": _roi_meta.get("roi_height"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "filename": filename,
+    }
+
 # Synchronous validation: capture image, run AI, optionally save result
 @api_router.post("/validate-sync")
 async def validate_sync(payload: ValidateSyncRequest):
@@ -1927,10 +2028,18 @@ async def validate_sync(payload: ValidateSyncRequest):
     # Find PLU
     plu_product = await db.plu_products.find_one({"plu_code": payload.plu_code}, {"_id": 0})
     if not plu_product:
-        raise HTTPException(status_code=404, detail="PLU not found")
-    if isinstance(plu_product['created_at'], str):
-        plu_product['created_at'] = datetime.fromisoformat(plu_product['created_at'])
-    plu_obj = PLUProduct(**plu_product)
+        if AI_PROVIDER != "butcher_resnet":
+            raise HTTPException(status_code=404, detail="PLU not found")
+        # ResNet top-k mode can run without a DB PLU row.
+        plu_obj = PLUProduct(
+            plu_code=str(payload.plu_code),
+            name=str(payload.plu_code),
+            description="resnet_topk_placeholder",
+        )
+    else:
+        if isinstance(plu_product['created_at'], str):
+            plu_product['created_at'] = datetime.fromisoformat(plu_product['created_at'])
+        plu_obj = PLUProduct(**plu_product)
 
     # Determine image source: file_path -> image_base64 -> camera
     image_base64 = None
@@ -1978,7 +2087,71 @@ async def validate_sync(payload: ValidateSyncRequest):
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to read latest file: {e}")
     processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
-    # Run AI
+
+    # ResNet-only response mode for VB compatibility on the same endpoint.
+    if AI_PROVIDER == "butcher_resnet":
+        from butcher_runtime import predict_base64_image
+
+        top_k = 5
+        start = time.monotonic()
+        resnet_result = await asyncio.to_thread(
+            predict_base64_image,
+            processed_image_base64,
+            BUTCHER_CONFIG_PATH,
+            top_k,
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+
+        top_matches = resnet_result.get("top_matches")
+        if not isinstance(top_matches, list):
+            top_matches = []
+        top_matches = top_matches[:top_k]
+
+        top_plu_codes: List[str] = []
+        for item in top_matches:
+            code = str(item.get("plu_code") or "").strip()
+            if code:
+                top_plu_codes.append(code)
+
+        predicted_plu = str(
+            resnet_result.get("predicted_class")
+            or (top_plu_codes[0] if top_plu_codes else "")
+        )
+        predicted_prob = float(resnet_result.get("predicted_prob", 0.0))
+        predicted_prob_pct = round(predicted_prob * 100.0, 2)
+        ts = datetime.now(timezone.utc).isoformat()
+
+        return _stringify_response({
+            "is_match": "",
+            "confidence": predicted_prob_pct,
+            "analysis": f"ResNet top-{top_k}: {','.join(top_plu_codes)}",
+            "analysis_selected_plu": "",
+            "analysis_selected_score": "",
+            "analysis_best_other_score": "",
+            "analysis_predicted_plu": predicted_plu,
+            "analysis_predicted_score": f"{predicted_prob:.3f}",
+            "analysis_embedding_count": "",
+            "top_matches": top_matches,
+            "top_plu_codes": top_plu_codes,
+            "top_plu_codes_csv": ",".join(top_plu_codes),
+            "top1_plu": top_plu_codes[0] if len(top_plu_codes) > 0 else "",
+            "top2_plu": top_plu_codes[1] if len(top_plu_codes) > 1 else "",
+            "top3_plu": top_plu_codes[2] if len(top_plu_codes) > 2 else "",
+            "top4_plu": top_plu_codes[3] if len(top_plu_codes) > 3 else "",
+            "top5_plu": top_plu_codes[4] if len(top_plu_codes) > 4 else "",
+            "ai_provider": "butcher_resnet",
+            "ai_model": "",
+            "processing_ms": round(elapsed_ms, 2),
+            "roi_applied": bool(_roi_meta.get("roi_applied")),
+            "roi_reason": str(_roi_meta.get("roi_reason", "")),
+            "roi_width": _roi_meta.get("roi_width"),
+            "roi_height": _roi_meta.get("roi_height"),
+            "timestamp": ts,
+            "validation_id": "",
+            "filename": filename,
+        })
+
+    # Run AI for all non-ResNet providers (existing behavior).
     start = time.monotonic()
     result = await analyze_image_with_ai(processed_image_base64, plu_obj)
     elapsed_ms = (time.monotonic() - start) * 1000.0
