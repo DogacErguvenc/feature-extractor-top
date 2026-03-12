@@ -2119,12 +2119,40 @@ async def validate_sync(payload: ValidateSyncRequest):
         )
         predicted_prob = float(resnet_result.get("predicted_prob", 0.0))
         predicted_prob_pct = round(predicted_prob * 100.0, 2)
-        ts = datetime.now(timezone.utc).isoformat()
+        analysis_text = f"ResNet top-{top_k}: {','.join(top_plu_codes)}"
+
+        validation = ValidationResult(
+            plu_code=str(payload.plu_code),
+            selected_plu_name=str(plu_obj.name),
+            image_base64=image_base64,
+            processed_image_base64=processed_image_base64 if _roi_meta.get("roi_applied") else None,
+            roi_applied=bool(_roi_meta.get("roi_applied")),
+            roi_reason=str(_roi_meta.get("roi_reason", "")),
+            roi_width=int(_roi_meta["roi_width"]) if _roi_meta.get("roi_width") is not None else None,
+            roi_height=int(_roi_meta["roi_height"]) if _roi_meta.get("roi_height") is not None else None,
+            ai_analysis=analysis_text,
+            analysis_selected_plu="",
+            analysis_selected_score="",
+            analysis_best_other_score="",
+            analysis_predicted_plu=predicted_plu,
+            analysis_predicted_score=f"{predicted_prob:.3f}",
+            analysis_embedding_count="",
+            top_matches=top_matches,
+            is_match=False,
+            confidence=predicted_prob_pct,
+            ai_provider="butcher_resnet",
+            ai_model="",
+            processing_ms=round(elapsed_ms, 2),
+            source="resnet_topk",
+        )
+        doc = validation.model_dump()
+        doc["timestamp"] = doc["timestamp"].isoformat()
+        await db.validation_results.insert_one(doc)
 
         return _stringify_response({
             "is_match": "",
             "confidence": predicted_prob_pct,
-            "analysis": f"ResNet top-{top_k}: {','.join(top_plu_codes)}",
+            "analysis": analysis_text,
             "analysis_selected_plu": "",
             "analysis_selected_score": "",
             "analysis_best_other_score": "",
@@ -2146,8 +2174,8 @@ async def validate_sync(payload: ValidateSyncRequest):
             "roi_reason": str(_roi_meta.get("roi_reason", "")),
             "roi_width": _roi_meta.get("roi_width"),
             "roi_height": _roi_meta.get("roi_height"),
-            "timestamp": ts,
-            "validation_id": "",
+            "timestamp": doc["timestamp"],
+            "validation_id": validation.id,
             "filename": filename,
         })
 
@@ -2668,10 +2696,16 @@ async def update_ai_config(config: AIConfigUpdate):
 async def get_dashboard_stats():
     total_images = await db.captured_images.count_documents({})
     total_validations = await db.validation_results.count_documents({})
-    match_count = await db.validation_results.count_documents({"is_match": True})
-    mismatch_count = await db.validation_results.count_documents({"is_match": False})
+    dino_metrics_filter = {"source": {"$ne": "resnet_topk"}}
+    dino_total_validations = await db.validation_results.count_documents(dino_metrics_filter)
+    match_query = dict(dino_metrics_filter)
+    match_query["is_match"] = True
+    mismatch_query = dict(dino_metrics_filter)
+    mismatch_query["is_match"] = False
+    match_count = await db.validation_results.count_documents(match_query)
+    mismatch_count = await db.validation_results.count_documents(mismatch_query)
     
-    match_percentage = (match_count / total_validations * 100) if total_validations > 0 else 0
+    match_percentage = (match_count / dino_total_validations * 100) if dino_total_validations > 0 else 0
     
     # Images by PLU
     pipeline = [
@@ -2697,6 +2731,7 @@ async def get_dashboard_stats():
 @api_router.get("/stats/validation-kpi")
 async def get_validation_kpi(top_pairs: int = 10):
     per_plu_pipeline = [
+        {"$match": {"source": {"$ne": "resnet_topk"}}},
         {"$group": {
             "_id": "$plu_code",
             "total": {"$sum": 1},
@@ -2722,6 +2757,7 @@ async def get_validation_kpi(top_pairs: int = 10):
 
     confusion_pipeline = [
         {"$match": {
+            "source": {"$ne": "resnet_topk"},
             "is_match": False,
             "analysis_predicted_plu": {"$nin": [None, ""]},
         }},

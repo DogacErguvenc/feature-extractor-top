@@ -254,6 +254,10 @@
   border-left: 4px solid #ef4444;
 }
 
+.validation-card.topk {
+  border-left: 4px solid #0284c7;
+}
+
 .result-badge {
   padding: 4px 12px;
   border-radius: 12px;
@@ -270,6 +274,11 @@
 .result-badge.mismatch {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.result-badge.neutral {
+  background: #e0f2fe;
+  color: #075985;
 }
 
 .confidence-bar {

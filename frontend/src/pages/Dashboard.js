@@ -64,10 +64,10 @@ const Dashboard = () => {
     return `${raw.toFixed(1)}%`;
   };
 
-  const summarizeTopMatches = (matches) => {
+  const summarizeTopMatches = (matches, limit = 3) => {
     if (!Array.isArray(matches) || matches.length === 0) return "-";
     return matches
-      .slice(0, 3)
+      .slice(0, limit)
       .map((match, idx) => {
         const rank = match?.rank ?? idx + 1;
         const pluCode = match?.plu_code || "?";
@@ -75,6 +75,10 @@ const Dashboard = () => {
       })
       .join(" | ");
   };
+
+  const isResnetTopKResult = (result) => result?.source === "resnet_topk";
+
+  const topMatchesLimitFor = (result) => (isResnetTopKResult(result) ? 5 : 3);
 
   useEffect(() => {
     fetchDashboardData();
@@ -432,7 +436,7 @@ const Dashboard = () => {
         </Card>
       </div>
 
-      {stats.total_validations > 0 && (
+      {(stats.match_count + stats.mismatch_count) > 0 && (
         <Card className="accuracy-card" data-testid="accuracy-card">
           <CardHeader>
             <CardTitle>Doğruluk Oranı</CardTitle>
@@ -443,7 +447,7 @@ const Dashboard = () => {
                 <div className="accuracy-value" data-testid="accuracy-percentage">{stats.match_percentage}%</div>
               </div>
               <div className="accuracy-details">
-                <p>Toplam {stats.total_validations} kontrol yapıldı</p>
+                <p>Toplam {stats.match_count + stats.mismatch_count} uyumluluk kontrolu</p>
                 <p className="match-text">✔ {stats.match_count} uyumlu tespit</p>
                 <p className="mismatch-text">✖ {stats.mismatch_count} uyumsuz tespit</p>
               </div>
@@ -533,70 +537,79 @@ const Dashboard = () => {
                 </CardContent>
               </Card>
             ) : (
-              validationResults.map((result) => (
-                <Card
-                  key={result.id}
-                  className={`validation-card ${result.is_match ? "match" : "mismatch"} clickable`}
-                  data-testid={`validation-card-${result.id}`}
-                  onClick={() => handleValidationClick(result.id)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <CardHeader>
-                    <CardTitle data-testid={`validation-plu-${result.id}`}>
-                      <span>{result.selected_plu_name}</span>
-                      <span className={`result-badge ${result.is_match ? 'match' : 'mismatch'}`} data-testid={`validation-result-${result.id}`}>
-                        {result.is_match ? "✔ Uyumlu" : "✖ Uyumsuz"}
-                      </span>
-                    </CardTitle>
-                    <CardDescription data-testid={`validation-timestamp-${result.id}`}>
-                      {new Date(result.timestamp).toLocaleString('tr-TR')}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="model-chip" data-testid={`validation-model-${result.id}`}>
-                      Model: {formatModel(result.ai_provider, result.ai_model)}
-                    </p>
-                    <p className="model-chip" data-testid={`validation-duration-${result.id}`}>
-                      Süre: {result.processing_ms !== undefined && result.processing_ms !== null ? `${result.processing_ms} ms` : "-"}
-                    </p>
-                    {!result.is_match && result.analysis_predicted_plu && (
-                      <p className="model-chip" data-testid={`validation-nearest-plu-${result.id}`}>
-                        En yakin PLU: {result.analysis_predicted_plu} ({formatSimilarityPercent(result.analysis_predicted_score)})
+              validationResults.map((result) => {
+                const isTopKOnly = isResnetTopKResult(result);
+                return (
+                  <Card
+                    key={result.id}
+                    className={`validation-card ${isTopKOnly ? "topk" : (result.is_match ? "match" : "mismatch")} clickable`}
+                    data-testid={`validation-card-${result.id}`}
+                    onClick={() => handleValidationClick(result.id)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <CardHeader>
+                      <CardTitle data-testid={`validation-plu-${result.id}`}>
+                        <span>{result.selected_plu_name}</span>
+                        {isTopKOnly ? (
+                          <span className="result-badge neutral" data-testid={`validation-result-${result.id}`}>
+                            Top-5
+                          </span>
+                        ) : (
+                          <span className={`result-badge ${result.is_match ? "match" : "mismatch"}`} data-testid={`validation-result-${result.id}`}>
+                            {result.is_match ? "✔ Uyumlu" : "✖ Uyumsuz"}
+                          </span>
+                        )}
+                      </CardTitle>
+                      <CardDescription data-testid={`validation-timestamp-${result.id}`}>
+                        {new Date(result.timestamp).toLocaleString('tr-TR')}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="model-chip" data-testid={`validation-model-${result.id}`}>
+                        Model: {formatModel(result.ai_provider, result.ai_model)}
                       </p>
-                    )}
-                    {Array.isArray(result.top_matches) && result.top_matches.length > 0 && (
-                      <p className="model-chip" data-testid={`validation-top-matches-${result.id}`}>
-                        Top 3 benzer: {summarizeTopMatches(result.top_matches)}
+                      <p className="model-chip" data-testid={`validation-duration-${result.id}`}>
+                        Süre: {result.processing_ms !== undefined && result.processing_ms !== null ? `${result.processing_ms} ms` : "-"}
                       </p>
-                    )}
-                    {result.has_processed_image && (
-                      <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
-                        ROI: crop kaydi var
-                      </p>
-                    )}
-                    {(result.ai_provider === "local_gemini" || result.ai_provider === "local_gemini_consensus") && (
-                      <div className="fallback-details">
-                        <p className="model-chip" data-testid={`validation-local-${result.id}`}>
-                          Local: {result.fallback_local_match === true ? "Uyumlu" : result.fallback_local_match === false ? "Uyumsuz" : "-"} ({result.fallback_local_confidence ?? "-"}%)
+                      {!isTopKOnly && !result.is_match && result.analysis_predicted_plu && (
+                        <p className="model-chip" data-testid={`validation-nearest-plu-${result.id}`}>
+                          En yakin PLU: {result.analysis_predicted_plu} ({formatSimilarityPercent(result.analysis_predicted_score)})
                         </p>
-                        <p className="model-chip" data-testid={`validation-remote-${result.id}`}>
-                          Gemini: {result.fallback_remote_match === true ? "Uyumlu" : result.fallback_remote_match === false ? "Uyumsuz" : "-"} ({result.fallback_remote_confidence ?? "-"}%)
+                      )}
+                      {Array.isArray(result.top_matches) && result.top_matches.length > 0 && (
+                        <p className="model-chip" data-testid={`validation-top-matches-${result.id}`}>
+                          Top {topMatchesLimitFor(result)} benzer: {summarizeTopMatches(result.top_matches, topMatchesLimitFor(result))}
                         </p>
-                      </div>
-                    )}
+                      )}
+                      {result.has_processed_image && (
+                        <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
+                          ROI: crop kaydi var
+                        </p>
+                      )}
+                      {(result.ai_provider === "local_gemini" || result.ai_provider === "local_gemini_consensus") && (
+                        <div className="fallback-details">
+                          <p className="model-chip" data-testid={`validation-local-${result.id}`}>
+                            Local: {result.fallback_local_match === true ? "Uyumlu" : result.fallback_local_match === false ? "Uyumsuz" : "-"} ({result.fallback_local_confidence ?? "-"}%)
+                          </p>
+                          <p className="model-chip" data-testid={`validation-remote-${result.id}`}>
+                            Gemini: {result.fallback_remote_match === true ? "Uyumlu" : result.fallback_remote_match === false ? "Uyumsuz" : "-"} ({result.fallback_remote_confidence ?? "-"}%)
+                          </p>
+                        </div>
+                      )}
 
-                    <div className="confidence-bar">
-                      <div className="confidence-label" data-testid={`validation-confidence-${result.id}`}>Güven: {result.confidence}%</div>
-                      <div className="confidence-progress">
-                        <div 
-                          className="confidence-fill" 
-                          style={{width: `${result.confidence}%`}}
-                        ></div>
+                      <div className="confidence-bar">
+                        <div className="confidence-label" data-testid={`validation-confidence-${result.id}`}>{isTopKOnly ? "Top-1 Skor" : "Güven"}: {result.confidence}%</div>
+                        <div className="confidence-progress">
+                          <div
+                            className="confidence-fill"
+                            style={{width: `${result.confidence}%`}}
+                          ></div>
+                        </div>
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))
+                    </CardContent>
+                  </Card>
+                );
+              })
             )}
           </div>
           {validationResults.length > 0 && (
@@ -827,6 +840,7 @@ const Dashboard = () => {
                   const timestamp = rawTime ? new Date(rawTime).toLocaleString("tr-TR") : "-";
                   const phase = modalData?.phase;
                   const hasMatch = typeof modalData?.is_match === "boolean";
+                  const isTopKOnly = isResnetTopKResult(modalData);
                   const hasProcessedImage = Boolean(modalData?.processed_image_base64);
                   const hasOriginalImage = Boolean(modalData?.image_base64);
                   const canSwitchImage = hasProcessedImage && hasOriginalImage;
@@ -844,9 +858,14 @@ const Dashboard = () => {
                             {phase === "training" ? "Egitim" : "Uretim"}
                           </span>
                         )}
-                        {hasMatch && (
+                        {hasMatch && !isTopKOnly && (
                           <span className={`result-badge ${modalData.is_match ? "match" : "mismatch"}`}>
                             {modalData.is_match ? "Match" : "Mismatch"}
+                          </span>
+                        )}
+                        {isTopKOnly && (
+                          <span className="result-badge neutral">
+                            Top-5
                           </span>
                         )}
                       </div>
@@ -884,14 +903,14 @@ const Dashboard = () => {
                       <div className="modal-info">
                         <p><strong>ID:</strong> {modalData?.id || "-"}</p>
                         <p><strong>Zaman:</strong> {timestamp}</p>
-                        {!modalData?.is_match && modalData?.analysis_predicted_plu && (
+                        {!isTopKOnly && !modalData?.is_match && modalData?.analysis_predicted_plu && (
                           <p>
                             <strong>En yakin PLU:</strong> {modalData.analysis_predicted_plu} ({formatSimilarityPercent(modalData.analysis_predicted_score)})
                           </p>
                         )}
                         {Array.isArray(modalData?.top_matches) && modalData.top_matches.length > 0 && (
                           <p>
-                            <strong>Top 3 benzer:</strong> {summarizeTopMatches(modalData.top_matches)}
+                            <strong>Top {topMatchesLimitFor(modalData)} benzer:</strong> {summarizeTopMatches(modalData.top_matches, topMatchesLimitFor(modalData))}
                           </p>
                         )}
                         <p>
@@ -918,4 +937,3 @@ const Dashboard = () => {
 };
 
 export default Dashboard;
-
