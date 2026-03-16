@@ -2168,8 +2168,8 @@ async def validate_sync(payload: ValidateSyncRequest):
         doc["timestamp"] = doc["timestamp"].isoformat()
         await db.validation_results.insert_one(doc)
 
-        return _stringify_response({
-            "is_match": "",
+        response_payload = _stringify_response({
+            "is_match": False,
             "confidence": predicted_prob_pct,
             "analysis": analysis_text,
             "analysis_selected_plu": "",
@@ -2197,6 +2197,10 @@ async def validate_sync(payload: ValidateSyncRequest):
             "validation_id": validation.id,
             "filename": filename,
         })
+        # VB tarafi is_match alanini boolean olarak deserialize ediyor.
+        # ResNet modunda uyumlu/uyumsuz anlami olmadigi icin her zaman false donuyoruz.
+        response_payload["is_match"] = False
+        return response_payload
 
     # Run AI for all non-ResNet providers (existing behavior).
     start = time.monotonic()
