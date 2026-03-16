@@ -78,7 +78,9 @@ const Dashboard = () => {
 
   const isResnetTopKResult = (result) => result?.source === "resnet_topk";
 
-  const topMatchesLimitFor = (result) => (isResnetTopKResult(result) ? 5 : 3);
+  const topMatchesLimitFor = (result) => (
+    isResnetTopKResult(result) || result?.ai_provider === "butcher_resnet" ? 5 : 3
+  );
 
   useEffect(() => {
     fetchDashboardData();

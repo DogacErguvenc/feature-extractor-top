@@ -21,16 +21,18 @@ const formatTopMatchScore = (match) => {
   return `${raw.toFixed(1)}%`;
 };
 
-const summarizeTopMatches = (matches) => {
+const summarizeTopMatches = (matches, limit = 3) => {
   if (!Array.isArray(matches) || matches.length === 0) return "-";
   return matches
-    .slice(0, 3)
+    .slice(0, limit)
     .map((match, idx) => {
       const rank = match?.rank ?? idx + 1;
       return `${rank}. ${match?.plu_code || "?"} (${formatTopMatchScore(match)})`;
     })
     .join(" | ");
 };
+
+const topMatchesLimitFor = (result) => (result?.ai_provider === "butcher_resnet" ? 5 : 3);
 
 const formatSize = (size) => {
   if (!size) return "-";
@@ -391,7 +393,7 @@ const BatchProcessing = () => {
                     </p>
                     {!item.error && Array.isArray(item.result?.top_matches) && item.result.top_matches.length > 0 && (
                       <p className="analysis-text">
-                        Top 3 benzer: {summarizeTopMatches(item.result.top_matches)}
+                        Top {topMatchesLimitFor(item.result)} benzer: {summarizeTopMatches(item.result.top_matches, topMatchesLimitFor(item.result))}
                       </p>
                     )}
                   </div>

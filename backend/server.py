@@ -1293,18 +1293,29 @@ async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_
     }
 
 
-async def run_butcher_resnet_inference(image_base64: str, plu_product: PLUProduct) -> dict:
+async def run_butcher_resnet_inference(
+    image_base64: str,
+    plu_product: PLUProduct,
+    top_k: Optional[int] = None,
+) -> dict:
     """
     butcher-vision mantığıyla ResNet18 checkpoint inference.
     Config + best.pth + class_to_idx.json kullanır.
     """
     from butcher_runtime import predict_base64_image
 
+    effective_top_k = BUTCHER_TOP_K
+    if top_k is not None:
+        try:
+            effective_top_k = max(1, int(top_k))
+        except Exception:
+            effective_top_k = BUTCHER_TOP_K
+
     result = await asyncio.to_thread(
         predict_base64_image,
         image_base64,
         BUTCHER_CONFIG_PATH,
-        BUTCHER_TOP_K,
+        effective_top_k,
     )
     top_matches = result.get("top_matches", [])
     class_probs = result.get("class_probs", {})
@@ -1473,7 +1484,11 @@ async def run_remote_inference(provider: str, model_name: str, image_base64: str
     }
 
 # AI Analysis function
-async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> dict:
+async def analyze_image_with_ai(
+    image_base64: str,
+    plu_product: PLUProduct,
+    resnet_top_k: Optional[int] = None,
+) -> dict:
     """Analyze image using configured AI provider."""
     try:
         provider = AI_PROVIDER
@@ -1481,7 +1496,11 @@ async def analyze_image_with_ai(image_base64: str, plu_product: PLUProduct) -> d
 
         # 0) Butcher-style ResNet18 classifier
         if provider == 'butcher_resnet':
-            return await run_butcher_resnet_inference(image_base64, plu_product)
+            return await run_butcher_resnet_inference(
+                image_base64,
+                plu_product,
+                top_k=resnet_top_k,
+            )
 
         # 1) Only local (small)
         if provider == 'local':
@@ -2319,7 +2338,11 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
 
         processed_image_base64, _roi_meta = preprocess_image_for_ai(image_base64)
         start_t = time.monotonic()
-        ai_result = await analyze_image_with_ai(processed_image_base64, PLUProduct(**plu_product))
+        ai_result = await analyze_image_with_ai(
+            processed_image_base64,
+            PLUProduct(**plu_product),
+            resnet_top_k=5 if AI_PROVIDER == "butcher_resnet" else None,
+        )
         elapsed_ms = (time.monotonic() - start_t) * 1000.0
 
         validation = ValidationResult(
