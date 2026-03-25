@@ -155,7 +155,7 @@ elseif (Test-Path $backendEnv) {
 else {
 @"
 MONGO_URL=mongodb://127.0.0.1:27017
-DB_NAME=terazi_ai
+DB_NAME=terazi_production
 AI_PROVIDER=butcher_resnet
 "@ | Set-Content -LiteralPath $distEnvExample -Encoding UTF8
 }
