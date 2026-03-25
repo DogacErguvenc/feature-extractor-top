@@ -30,9 +30,15 @@ function Resolve-PythonExe {
 }
 
 function Resolve-IsccExe {
-    $candidate = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-    if (Test-Path $candidate) {
-        return $candidate
+    $candidates = @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
     }
 
     $isccCmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
@@ -137,7 +143,22 @@ foreach ($dir in $runtimeDirs) {
 
 # Deployment helper files
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "start_backend.bat") -Destination (Join-Path $distDir "start_backend.bat") -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "runtime.env.example") -Destination (Join-Path $distDir ".env.example") -Force
+$runtimeEnvExample = Join-Path $PSScriptRoot "runtime.env.example"
+$distEnvExample = Join-Path $distDir ".env.example"
+$backendEnv = Join-Path $backendDir ".env"
+if (Test-Path $runtimeEnvExample) {
+    Copy-Item -LiteralPath $runtimeEnvExample -Destination $distEnvExample -Force
+}
+elseif (Test-Path $backendEnv) {
+    Copy-Item -LiteralPath $backendEnv -Destination $distEnvExample -Force
+}
+else {
+@"
+MONGO_URL=mongodb://127.0.0.1:27017
+DB_NAME=terazi_ai
+AI_PROVIDER=butcher_resnet
+"@ | Set-Content -LiteralPath $distEnvExample -Encoding UTF8
+}
 
 Write-Host "EXE hazir:" $distDir
 
