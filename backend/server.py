@@ -776,6 +776,11 @@ def decode_base64_to_pil(image_base64: str) -> Image.Image:
 def _stringify_value(value) -> str:
     if value is None:
         return ""
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
