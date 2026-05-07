@@ -652,6 +652,8 @@ async def ensure_database_indexes() -> None:
         await db.validation_results.create_index([("source", 1), ("timestamp", -1)], background=True)
         await db.validation_results.create_index([("source", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
         await db.validation_results.create_index([("source", 1), ("plu_code", 1)], background=True)
+        await db.validation_results.create_index([("ai_provider", 1), ("timestamp", -1)], background=True)
+        await db.validation_results.create_index([("ai_provider", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
         await db.captured_images.create_index([("timestamp", -1)], background=True)
         await db.captured_images.create_index([("plu_code", 1), ("timestamp", -1)], background=True)
     except Exception as e:
@@ -2934,7 +2936,7 @@ async def get_resnet_top5_analysis(
     selected_code = str(plu_code or "").strip()
 
     per_plu_pipeline = [
-        {"$match": {"source": "resnet_topk"}},
+        {"$match": {"ai_provider": "butcher_resnet"}},
         {"$project": {
             "_id": 0,
             "plu_code": {"$toString": {"$ifNull": ["$plu_code", ""]}},
@@ -3122,7 +3124,7 @@ async def get_resnet_top5_analysis(
 
     if selected_code:
         selected_query = {
-            "source": "resnet_topk",
+            "ai_provider": "butcher_resnet",
             "plu_code": selected_code,
         }
         projection = {
