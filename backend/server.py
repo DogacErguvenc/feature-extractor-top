@@ -644,6 +644,20 @@ async def persist_ai_config(provider: str, model: str) -> None:
     except Exception as e:
         logging.error(f"Error saving AI config to DB: {e}")
 
+
+async def ensure_database_indexes() -> None:
+    """Create indexes used by dashboard and analysis queries."""
+    try:
+        await db.validation_results.create_index([("timestamp", -1)], background=True)
+        await db.validation_results.create_index([("source", 1), ("timestamp", -1)], background=True)
+        await db.validation_results.create_index([("source", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
+        await db.validation_results.create_index([("source", 1), ("plu_code", 1)], background=True)
+        await db.captured_images.create_index([("timestamp", -1)], background=True)
+        await db.captured_images.create_index([("plu_code", 1), ("timestamp", -1)], background=True)
+    except Exception as e:
+        logging.error(f"Error creating database indexes: {e}")
+
+
 def softmax(logits: np.ndarray) -> np.ndarray:
     e_x = np.exp(logits - np.max(logits))
     return e_x / e_x.sum(axis=-1, keepdims=True)
@@ -788,6 +802,100 @@ def _stringify_value(value) -> str:
 
 def _stringify_response(payload: dict) -> dict:
     return {key: _stringify_value(val) for key, val in payload.items()}
+
+
+def _to_score_pct(match: dict) -> Optional[float]:
+    """Normalize a top-match score to percentage when possible."""
+    if not isinstance(match, dict):
+        return None
+    raw_score = match.get("score")
+    score_type = str(match.get("score_type") or "").strip().lower()
+    prob_raw = match.get("prob")
+    score_val: Optional[float] = None
+    prob_val: Optional[float] = None
+
+    try:
+        if raw_score is not None and raw_score != "":
+            score_val = float(raw_score)
+    except (TypeError, ValueError):
+        score_val = None
+
+    try:
+        if prob_raw is not None and prob_raw != "":
+            prob_val = float(prob_raw)
+    except (TypeError, ValueError):
+        prob_val = None
+
+    if score_type == "probability_pct" and score_val is not None:
+        return score_val
+    if prob_val is not None:
+        return prob_val * 100.0
+    if score_val is None:
+        return None
+    if score_val <= 1.0:
+        return score_val * 100.0
+    return score_val
+
+
+def _ensure_top_matches(raw_value, top_k: int = 5) -> List[dict]:
+    if isinstance(raw_value, str):
+        try:
+            raw_value = json.loads(raw_value)
+        except Exception:
+            return []
+    if not isinstance(raw_value, list):
+        return []
+    top: List[dict] = []
+    for item in raw_value:
+        if isinstance(item, dict):
+            top.append(item)
+        if len(top) >= max(1, int(top_k)):
+            break
+    return top
+
+
+def _extract_resnet_metrics_for_plu(doc: dict, selected_plu: str, low_conf_threshold_pct: float) -> dict:
+    top_matches = _ensure_top_matches(doc.get("top_matches"), top_k=5)
+    top5_codes: List[str] = []
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code:
+            top5_codes.append(code)
+
+    top1_code = top5_codes[0] if top5_codes else ""
+    top1_score_pct = _to_score_pct(top_matches[0]) if top_matches else None
+
+    selected_score_pct: Optional[float] = None
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code == selected_plu:
+            selected_score_pct = _to_score_pct(item)
+            break
+
+    is_top5_match = selected_plu in top5_codes
+    is_top1_match = bool(top1_code and top1_code == selected_plu)
+    is_low_conf_top5 = bool(
+        is_top5_match
+        and selected_score_pct is not None
+        and selected_score_pct < low_conf_threshold_pct
+    )
+
+    predicted_plu = str(doc.get("analysis_predicted_plu") or top1_code).strip()
+    filename = str(doc.get("original_filename") or doc.get("filename") or "").strip()
+
+    return {
+        "validation_id": str(doc.get("id") or ""),
+        "timestamp": doc.get("timestamp"),
+        "plu_code": selected_plu,
+        "filename": filename,
+        "predicted_plu": predicted_plu,
+        "top5_codes": top5_codes,
+        "top1_score_pct": round(top1_score_pct, 2) if top1_score_pct is not None else None,
+        "selected_score_pct": round(selected_score_pct, 2) if selected_score_pct is not None else None,
+        "is_top5_match": is_top5_match,
+        "is_top1_match": is_top1_match,
+        "is_low_conf_top5": is_low_conf_top5,
+    }
 
 
 def _build_local_top_matches(labels: List[dict], probs: np.ndarray, top_n: int = 3) -> List[dict]:
@@ -2168,6 +2276,7 @@ async def validate_sync(payload: ValidateSyncRequest):
             ai_model="",
             processing_ms=round(elapsed_ms, 2),
             source="resnet_topk",
+            original_filename=filename,
         )
         doc = validation.model_dump()
         doc["timestamp"] = doc["timestamp"].isoformat()
@@ -2241,6 +2350,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         fallback_remote_match=result.get("fallback_remote_match"),
         fallback_remote_confidence=result.get("fallback_remote_confidence"),
         reference_count=result.get("reference_count"),
+        original_filename=filename,
     )
     doc = validation.model_dump()
     doc['timestamp'] = doc['timestamp'].isoformat()
@@ -2811,6 +2921,275 @@ async def get_validation_kpi(top_pairs: int = 10):
         "top_confusions": confusion_pairs,
     }
 
+
+@api_router.get("/stats/resnet-top5-analysis")
+async def get_resnet_top5_analysis(
+    plu_code: Optional[str] = None,
+    low_conf_threshold_pct: float = 35.0,
+    sample_limit: int = 60,
+    include_only_low_conf: bool = False,
+):
+    threshold = max(0.0, min(float(low_conf_threshold_pct), 100.0))
+    sample_limit = max(1, min(int(sample_limit), 300))
+    selected_code = str(plu_code or "").strip()
+
+    per_plu_pipeline = [
+        {"$match": {"source": "resnet_topk"}},
+        {"$project": {
+            "_id": 0,
+            "plu_code": {"$toString": {"$ifNull": ["$plu_code", ""]}},
+            "timestamp": 1,
+            "top_matches": {
+                "$cond": [
+                    {"$isArray": "$top_matches"},
+                    {"$slice": ["$top_matches", 5]},
+                    [],
+                ]
+            },
+        }},
+        {"$match": {"plu_code": {"$ne": ""}}},
+        {"$addFields": {
+            "top5_codes": {
+                "$map": {
+                    "input": "$top_matches",
+                    "as": "m",
+                    "in": {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
+                }
+            },
+            "top1_match": {"$arrayElemAt": ["$top_matches", 0]},
+            "selected_match": {
+                "$first": {
+                    "$filter": {
+                        "input": "$top_matches",
+                        "as": "m",
+                        "cond": {
+                            "$eq": [
+                                {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
+                                {"$toString": {"$ifNull": ["$plu_code", ""]}},
+                            ]
+                        },
+                    }
+                }
+            },
+        }},
+        {"$addFields": {
+            "top1_code": {"$arrayElemAt": ["$top5_codes", 0]},
+            "is_top5_match": {"$in": ["$plu_code", "$top5_codes"]},
+            "top1_score_raw": {
+                "$convert": {
+                    "input": "$top1_match.score",
+                    "to": "double",
+                    "onError": None,
+                    "onNull": None,
+                }
+            },
+            "top1_prob_raw": {
+                "$convert": {
+                    "input": "$top1_match.prob",
+                    "to": "double",
+                    "onError": None,
+                    "onNull": None,
+                }
+            },
+            "selected_score_raw": {
+                "$convert": {
+                    "input": "$selected_match.score",
+                    "to": "double",
+                    "onError": None,
+                    "onNull": None,
+                }
+            },
+            "selected_prob_raw": {
+                "$convert": {
+                    "input": "$selected_match.prob",
+                    "to": "double",
+                    "onError": None,
+                    "onNull": None,
+                }
+            },
+        }},
+        {"$addFields": {
+            "is_top1_match": {"$eq": ["$plu_code", "$top1_code"]},
+            "top1_score_pct": {
+                "$ifNull": [
+                    "$top1_score_raw",
+                    {
+                        "$cond": [
+                            {"$ne": ["$top1_prob_raw", None]},
+                            {"$multiply": ["$top1_prob_raw", 100]},
+                            None,
+                        ]
+                    },
+                ]
+            },
+            "selected_score_pct": {
+                "$ifNull": [
+                    "$selected_score_raw",
+                    {
+                        "$cond": [
+                            {"$ne": ["$selected_prob_raw", None]},
+                            {"$multiply": ["$selected_prob_raw", 100]},
+                            None,
+                        ]
+                    },
+                ]
+            },
+        }},
+        {"$addFields": {
+            "is_low_conf_top5": {
+                "$and": [
+                    "$is_top5_match",
+                    {"$ne": ["$selected_score_pct", None]},
+                    {"$lt": ["$selected_score_pct", threshold]},
+                ]
+            },
+        }},
+        {"$group": {
+            "_id": "$plu_code",
+            "total": {"$sum": 1},
+            "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
+            "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
+            "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
+            "avg_top1_score_pct": {"$avg": "$top1_score_pct"},
+            "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
+            "top1_score_sum": {"$sum": {"$ifNull": ["$top1_score_pct", 0]}},
+            "top1_score_count": {"$sum": {"$cond": [{"$ne": ["$top1_score_pct", None]}, 1, 0]}},
+            "last_seen": {"$max": "$timestamp"},
+        }},
+        {"$sort": {"total": -1}},
+    ]
+    per_plu_docs = await db.validation_results.aggregate(per_plu_pipeline, allowDiskUse=True).to_list(10000)
+
+    per_plu_stats: List[dict] = []
+    total = 0
+    top5_match_total = 0
+    top1_match_total = 0
+    low_conf_top5_total = 0
+    top1_score_sum = 0.0
+    top1_score_count = 0
+
+    for item in per_plu_docs:
+        plu = str(item.get("_id") or "").strip()
+        plu_total = int(item.get("total") or 0)
+        top5_match_count = int(item.get("top5_match_count") or 0)
+        top1_match_count = int(item.get("top1_match_count") or 0)
+        low_conf_count = int(item.get("low_conf_top5_count") or 0)
+        top5_mismatch_count = max(0, plu_total - top5_match_count)
+
+        avg_top1_raw = item.get("avg_top1_score_pct")
+        avg_selected_raw = item.get("avg_selected_score_pct")
+        avg_top1 = round(float(avg_top1_raw), 2) if avg_top1_raw is not None else None
+        avg_selected = round(float(avg_selected_raw), 2) if avg_selected_raw is not None else None
+
+        per_plu_stats.append({
+            "plu_code": plu,
+            "total": plu_total,
+            "top5_match_count": top5_match_count,
+            "top5_mismatch_count": top5_mismatch_count,
+            "top5_match_rate": round((top5_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+            "top1_match_count": top1_match_count,
+            "top1_match_rate": round((top1_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+            "low_conf_top5_count": low_conf_count,
+            "low_conf_top5_rate": round((low_conf_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+            "avg_top1_score_pct": avg_top1,
+            "avg_selected_score_pct": avg_selected,
+            "last_seen": item.get("last_seen"),
+        })
+
+        total += plu_total
+        top5_match_total += top5_match_count
+        top1_match_total += top1_match_count
+        low_conf_top5_total += low_conf_count
+        top1_score_sum += float(item.get("top1_score_sum") or 0.0)
+        top1_score_count += int(item.get("top1_score_count") or 0)
+
+    top5_mismatch_total = max(0, total - top5_match_total)
+    summary = {
+        "total": total,
+        "top5_match_count": top5_match_total,
+        "top5_mismatch_count": top5_mismatch_total,
+        "top5_match_rate": round((top5_match_total / total) * 100.0, 2) if total else 0.0,
+        "top1_match_count": top1_match_total,
+        "top1_match_rate": round((top1_match_total / total) * 100.0, 2) if total else 0.0,
+        "low_conf_top5_count": low_conf_top5_total,
+        "low_conf_top5_rate": round((low_conf_top5_total / total) * 100.0, 2) if total else 0.0,
+        "avg_top1_score_pct": round(top1_score_sum / top1_score_count, 2) if top1_score_count else None,
+        "distinct_plu_count": len(per_plu_stats),
+    }
+
+    selected_stats = None
+    samples: List[dict] = []
+
+    if selected_code:
+        selected_query = {
+            "source": "resnet_topk",
+            "plu_code": selected_code,
+        }
+        projection = {
+            "_id": 0,
+            "id": 1,
+            "timestamp": 1,
+            "plu_code": 1,
+            "top_matches": 1,
+            "analysis_predicted_plu": 1,
+            "original_filename": 1,
+            "filename": 1,
+        }
+        cursor = db.validation_results.find(selected_query, projection).sort("timestamp", -1)
+
+        s_total = 0
+        s_top5_match = 0
+        s_top1_match = 0
+        s_low_conf_top5 = 0
+        s_selected_score_sum = 0.0
+        s_selected_score_count = 0
+
+        async for doc in cursor:
+            row = _extract_resnet_metrics_for_plu(doc, selected_code, threshold)
+            s_total += 1
+            if row["is_top5_match"]:
+                s_top5_match += 1
+            if row["is_top1_match"]:
+                s_top1_match += 1
+            if row["is_low_conf_top5"]:
+                s_low_conf_top5 += 1
+            if row["selected_score_pct"] is not None:
+                s_selected_score_sum += float(row["selected_score_pct"])
+                s_selected_score_count += 1
+
+            if include_only_low_conf and not row["is_low_conf_top5"]:
+                continue
+            if len(samples) < sample_limit:
+                samples.append(row)
+
+        selected_stats = {
+            "plu_code": selected_code,
+            "total": s_total,
+            "top5_match_count": s_top5_match,
+            "top5_mismatch_count": max(0, s_total - s_top5_match),
+            "top5_match_rate": round((s_top5_match / s_total) * 100.0, 2) if s_total else 0.0,
+            "top1_match_count": s_top1_match,
+            "top1_match_rate": round((s_top1_match / s_total) * 100.0, 2) if s_total else 0.0,
+            "low_conf_top5_count": s_low_conf_top5,
+            "low_conf_top5_rate": round((s_low_conf_top5 / s_total) * 100.0, 2) if s_total else 0.0,
+            "avg_selected_score_pct": round(s_selected_score_sum / s_selected_score_count, 2) if s_selected_score_count else None,
+            "sample_count": len(samples),
+        }
+
+    return {
+        "query": {
+            "plu_code": selected_code or None,
+            "low_conf_threshold_pct": threshold,
+            "sample_limit": sample_limit,
+            "include_only_low_conf": bool(include_only_low_conf),
+        },
+        "summary": summary,
+        "per_plu": per_plu_stats,
+        "selected_plu": selected_stats,
+        "samples": samples,
+    }
+
+
 @api_router.get("/health", response_model=HealthStatus)
 async def health_check():
     # Mongo
@@ -2868,6 +3247,7 @@ async def shutdown_db_client():
 async def load_mode_on_startup():
     global SYSTEM_MODE
     global AI_PROVIDER, AI_MODEL
+    await ensure_database_indexes()
     SYSTEM_MODE = await load_system_mode_from_db()
     provider, model = await load_ai_config_from_db()
     AI_PROVIDER, AI_MODEL = provider, model

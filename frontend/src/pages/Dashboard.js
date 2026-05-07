@@ -35,6 +35,7 @@ const Dashboard = () => {
   const [refCandidatesPage, setRefCandidatesPage] = useState(1);
   const [refCandidatesLoading, setRefCandidatesLoading] = useState(false);
   const [refCandidatesStatus, setRefCandidatesStatus] = useState("pending");
+  const [activeTab, setActiveTab] = useState("images");
 
   const formatModel = (provider, model) => {
     const base = provider || "?";
@@ -87,16 +88,22 @@ const Dashboard = () => {
   }, []);
 
   useEffect(() => {
-    fetchCapturedImages(imagesPage);
-  }, [imagesPage]);
+    if (activeTab === "images") {
+      fetchCapturedImages(imagesPage);
+    }
+  }, [imagesPage, activeTab]);
 
   useEffect(() => {
-    fetchValidationResults(validationsPage);
-  }, [validationsPage]);
+    if (activeTab === "validations") {
+      fetchValidationResults(validationsPage);
+    }
+  }, [validationsPage, activeTab]);
 
   useEffect(() => {
-    fetchRefCandidates(refCandidatesPage, refCandidatesStatus);
-  }, [refCandidatesPage, refCandidatesStatus]);
+    if (activeTab === "ref-candidates") {
+      fetchRefCandidates(refCandidatesPage, refCandidatesStatus);
+    }
+  }, [refCandidatesPage, refCandidatesStatus, activeTab]);
 
   useEffect(() => {
     if (!stats) {
@@ -458,7 +465,12 @@ const Dashboard = () => {
         </Card>
       )}
 
-      <Tabs defaultValue="images" className="data-tabs" data-testid="data-tabs">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className="data-tabs"
+        data-testid="data-tabs"
+      >
         <TabsList>
           <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({totalImages || capturedImages.length})</TabsTrigger>
           <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({totalValidations || validationResults.length})</TabsTrigger>

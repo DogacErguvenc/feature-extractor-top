@@ -41,6 +41,8 @@
 .nav-links {
   display: flex;
   gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .nav-link {

@@ -1,0 +1,230 @@
+.resnet-analysis-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.resnet-analysis-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.resnet-header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.resnet-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.resnet-stat-card h3 {
+  font-size: 1.4rem;
+}
+
+.resnet-main-grid {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.resnet-plu-card .resnet-plu-search input {
+  width: 100%;
+  border: 1px solid #dbe1ea;
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.resnet-plu-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.resnet-plu-row {
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  text-align: left;
+}
+
+.resnet-plu-row:hover {
+  border-color: #7c8eed;
+  background: #f8faff;
+}
+
+.resnet-plu-row.active {
+  border-color: #5f73e7;
+  background: #eef2ff;
+}
+
+.resnet-plu-row-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #1f2937;
+}
+
+.resnet-plu-row-main span {
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
+.resnet-plu-row-sub {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #475569;
+  font-size: 0.84rem;
+}
+
+.resnet-detail-column {
+  display: grid;
+  gap: 12px;
+}
+
+.resnet-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.resnet-filter-grid label {
+  display: grid;
+  gap: 6px;
+  color: #334155;
+  font-size: 0.9rem;
+}
+
+.resnet-filter-grid input {
+  border: 1px solid #dbe1ea;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.resnet-checkbox {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-size: 0.9rem;
+}
+
+.resnet-filter-actions {
+  margin-top: 12px;
+}
+
+.resnet-selected-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.resnet-selected-grid .k {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.resnet-selected-grid .v {
+  margin: 2px 0 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.resnet-sample-list {
+  display: grid;
+  gap: 8px;
+}
+
+.resnet-sample-row {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #fff;
+}
+
+.resnet-sample-main {
+  display: grid;
+  gap: 3px;
+}
+
+.resnet-sample-main .file {
+  margin: 0;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.resnet-sample-main .meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.resnet-sample-stats {
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+  color: #334155;
+  font-size: 0.86rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  width: fit-content;
+}
+
+.chip.ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.chip.bad {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.chip.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.muted {
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 1000px) {
+  .resnet-main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .resnet-plu-list {
+    max-height: 300px;
+  }
+}

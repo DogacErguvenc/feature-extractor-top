@@ -32,6 +32,15 @@ const Navigation = () => {
             <span className="nav-icon" role="img" aria-label="dashboard">📊</span>
             Dashboard
           </Link>
+
+          <Link
+            to="/analysis"
+            className={`nav-link ${isActive("/analysis") ? "active" : ""}`}
+            data-testid="nav-link-analysis"
+          >
+            <span className="nav-icon" aria-hidden="true">AN</span>
+            Analiz
+          </Link>
           
           <Link 
             to="/batch-processing" 
