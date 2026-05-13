@@ -55,6 +55,8 @@ const BatchProcessing = () => {
   const [defaultPlu, setDefaultPlu] = useState("");
   const [processing, setProcessing] = useState(false);
   const [summary, setSummary] = useState(null);
+  const [folderingEnabled, setFolderingEnabled] = useState(false);
+  const [folderingInfo, setFolderingInfo] = useState(null);
 
   useEffect(() => {
     fetchPluList();
@@ -116,6 +118,7 @@ const BatchProcessing = () => {
   const resetSelection = () => {
     setFiles([]);
     setSummary(null);
+    setFolderingInfo(null);
   };
 
   const startProcessing = async () => {
@@ -132,6 +135,7 @@ const BatchProcessing = () => {
 
     setProcessing(true);
     setSummary(null);
+    setFolderingInfo(null);
     setFiles((prev) => prev.map((item) => ({ ...item, status: "processing" })));
 
     try {
@@ -143,6 +147,7 @@ const BatchProcessing = () => {
       const formData = new FormData();
       files.forEach((item) => formData.append("files", item.file, item.file.name));
       formData.append("metadata", JSON.stringify(metadata));
+      formData.append("foldering_enabled", folderingEnabled ? "true" : "false");
 
       const res = await axios.post(`${API}/batch/validate`, formData, {
         headers: { "Content-Type": "multipart/form-data" }
@@ -150,6 +155,7 @@ const BatchProcessing = () => {
 
       const resultList = res.data?.results || [];
       const summaryData = res.data?.summary || null;
+      const nextFoldering = res.data?.foldering || null;
 
       setFiles((prev) =>
         prev.map((item) => {
@@ -168,6 +174,7 @@ const BatchProcessing = () => {
       );
 
       setSummary(summaryData);
+      setFolderingInfo(nextFoldering);
       toast.success("Toplu kontrol tamamlandı");
       if (summaryData?.error_count) {
         toast.info(`${summaryData.error_count} fotoğraf işlenemedi`);
@@ -175,6 +182,7 @@ const BatchProcessing = () => {
     } catch (error) {
       console.error("Batch validation failed", error);
       toast.error("Toplu kontrol başarısız");
+      setFolderingInfo(null);
       setFiles((prev) =>
         prev.map((item) => ({
           ...item,
@@ -284,6 +292,23 @@ const BatchProcessing = () => {
             <p className="helper-text">
               Dosya adında PLU varsa otomatik eşleştiriyoruz, yoksa buradan seçebilirsiniz.
             </p>
+            <label className="foldering-toggle" htmlFor="foldering-enabled">
+              <input
+                id="foldering-enabled"
+                type="checkbox"
+                checked={folderingEnabled}
+                onChange={(e) => setFolderingEnabled(e.target.checked)}
+                disabled={processing}
+              />
+              <span>Klasörleme Aktif</span>
+            </label>
+            <p className="helper-text">
+              Aktif olursa sonuç dosyaları
+              {" "}
+              <code>backend\\batch_foldering\\&lt;batch_id&gt;</code>
+              {" "}
+              altına benzerlik kategorilerine göre kopyalanır.
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -368,6 +393,34 @@ const BatchProcessing = () => {
               <p className="summary-label">Hatalı</p>
             </div>
           </CardContent>
+          {folderingInfo?.enabled && (
+            <CardContent className="foldering-summary">
+              <p>
+                <strong>Klasör yolu:</strong> {folderingInfo.base_dir || "-"}
+              </p>
+              <p>
+                <strong>Kopyalanan:</strong> {folderingInfo.created_files || 0}
+                {" | "}
+                <strong>Hata:</strong> {folderingInfo.failed_files || 0}
+              </p>
+              <p>
+                <strong>Eşikler:</strong>
+                {" "}
+                düşük &lt; {folderingInfo.low_threshold_pct}%
+                {" | "}
+                yüksek &gt;= {folderingInfo.high_threshold_pct}%
+              </p>
+              {folderingInfo.categories && Object.keys(folderingInfo.categories).length > 0 && (
+                <p>
+                  <strong>Kategoriler:</strong>
+                  {" "}
+                  {Object.entries(folderingInfo.categories)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(" | ")}
+                </p>
+              )}
+            </CardContent>
+          )}
         </Card>
       )}
 
@@ -394,6 +447,11 @@ const BatchProcessing = () => {
                     {!item.error && Array.isArray(item.result?.top_matches) && item.result.top_matches.length > 0 && (
                       <p className="analysis-text">
                         Top {topMatchesLimitFor(item.result)} benzer: {summarizeTopMatches(item.result.top_matches, topMatchesLimitFor(item.result))}
+                      </p>
+                    )}
+                    {!item.error && item.result?.folder_category && (
+                      <p className="analysis-text">
+                        Klasör kategorisi: {item.result.folder_category}
                       </p>
                     )}
                   </div>

@@ -82,6 +82,20 @@
   margin-top: 6px;
 }
 
+.foldering-toggle {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.foldering-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
 .file-list-card .file-table {
   display: grid;
   gap: 10px;
@@ -207,6 +221,20 @@
 
 .summary-label {
   color: #4a5568;
+}
+
+.foldering-summary {
+  border-top: 1px solid #e2e8f0;
+  margin-top: 12px;
+  padding-top: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.foldering-summary p {
+  margin: 0;
+  color: #334155;
+  font-size: 0.92rem;
 }
 
 .results-card .result-list {

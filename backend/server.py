@@ -79,6 +79,9 @@ CLUSTER_ENABLE = os.environ.get('CLUSTER_ENABLE', 'true').lower() == 'true'
 CLUSTER_DUP_SIM = float(os.environ.get('CLUSTER_DUP_SIM', '0.98'))
 PLU_MAX_EMBEDDINGS = int(os.environ.get('PLU_MAX_EMBEDDINGS', '200'))
 PLU_MIN_EMBEDDINGS = int(os.environ.get('PLU_MIN_EMBEDDINGS', '40'))
+BATCH_FOLDERING_ROOT = Path(os.environ.get('BATCH_FOLDERING_ROOT', ROOT_DIR / "batch_foldering")).resolve()
+BATCH_FOLDERING_LOW_PCT = float(os.environ.get('BATCH_FOLDERING_LOW_PCT', '40'))
+BATCH_FOLDERING_HIGH_PCT = float(os.environ.get('BATCH_FOLDERING_HIGH_PCT', '70'))
 _raw_plu_budget_path = os.environ.get('PLU_BUDGETS_PATH', '').strip()
 _default_plu_budget_path = (ROOT_DIR / "plu_budgets.json")
 if _raw_plu_budget_path:
@@ -898,6 +901,94 @@ def _extract_resnet_metrics_for_plu(doc: dict, selected_plu: str, low_conf_thres
         "is_top1_match": is_top1_match,
         "is_low_conf_top5": is_low_conf_top5,
     }
+
+
+def _sanitize_filename(name: str) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return "image.jpg"
+    safe = "".join(ch if (ch.isalnum() or ch in ("-", "_", ".", " ")) else "_" for ch in raw)
+    safe = safe.strip(" .")
+    return safe or "image.jpg"
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}_{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def _categorize_batch_result(
+    expected_plu: str,
+    ai_provider: str,
+    top_matches_raw,
+    low_pct: float,
+    high_pct: float,
+) -> tuple[str, dict]:
+    expected = str(expected_plu or "").strip()
+    provider = str(ai_provider or "").strip()
+    if provider != "butcher_resnet":
+        return "diger_provider", {
+            "provider": provider,
+            "selected_score_pct": None,
+            "in_top5": False,
+            "top5_codes": [],
+            "top1_code": "",
+        }
+
+    top_matches = _ensure_top_matches(top_matches_raw, top_k=5)
+    top5_codes: List[str] = []
+    selected_score_pct: Optional[float] = None
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code:
+            top5_codes.append(code)
+        if code == expected:
+            selected_score_pct = _to_score_pct(item)
+
+    top1_code = top5_codes[0] if top5_codes else ""
+    in_top5 = expected in top5_codes
+    if not in_top5:
+        category = "top5_uyumsuz"
+    elif selected_score_pct is None:
+        category = "top5_skor_bilinmiyor"
+    elif selected_score_pct < low_pct:
+        category = "top5_dusuk"
+    elif selected_score_pct < high_pct:
+        category = "top5_orta"
+    else:
+        category = "top5_yuksek"
+
+    return category, {
+        "provider": provider,
+        "selected_score_pct": round(selected_score_pct, 2) if selected_score_pct is not None else None,
+        "in_top5": in_top5,
+        "top5_codes": top5_codes,
+        "top1_code": top1_code,
+    }
+
+
+def _save_batch_file_for_foldering(
+    batch_id: str,
+    expected_plu: str,
+    category: str,
+    filename: str,
+    file_bytes: bytes,
+) -> Path:
+    safe_name = _sanitize_filename(filename)
+    target_dir = BATCH_FOLDERING_ROOT / str(batch_id) / str(category) / str(expected_plu)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dst = _unique_path(target_dir / safe_name)
+    dst.write_bytes(file_bytes)
+    return dst
 
 
 def _build_local_top_matches(labels: List[dict], probs: np.ndarray, top_n: int = 3) -> List[dict]:
@@ -2392,7 +2483,11 @@ async def validate_sync(payload: ValidateSyncRequest):
     })
 
 @api_router.post("/batch/validate")
-async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = File(...)):
+async def batch_validate(
+    metadata: str = Form(...),
+    files: List[UploadFile] = File(...),
+    foldering_enabled: bool = Form(False),
+):
     """Validate a batch of uploaded photos against expected PLU codes."""
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
@@ -2408,6 +2503,19 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
     match_count = 0
     mismatch_count = 0
     error_count = 0
+    folder_low_pct = max(0.0, min(BATCH_FOLDERING_LOW_PCT, 100.0))
+    folder_high_pct = max(0.0, min(BATCH_FOLDERING_HIGH_PCT, 100.0))
+    if folder_high_pct <= folder_low_pct:
+        folder_high_pct = min(100.0, folder_low_pct + 1.0)
+    foldering_info = {
+        "enabled": bool(foldering_enabled),
+        "base_dir": str((BATCH_FOLDERING_ROOT / batch_id).resolve()) if foldering_enabled else "",
+        "low_threshold_pct": folder_low_pct,
+        "high_threshold_pct": folder_high_pct,
+        "created_files": 0,
+        "failed_files": 0,
+        "categories": {},
+    }
 
     for upload in files:
         filename = Path(upload.filename or "uploaded").name
@@ -2531,6 +2639,36 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
             "batch_id": batch_id,
             "status": "match" if ai_result.get("is_match") else "mismatch"
         }
+        if foldering_enabled:
+            try:
+                category, folder_meta = _categorize_batch_result(
+                    expected_plu=expected_plu,
+                    ai_provider=AI_PROVIDER,
+                    top_matches_raw=ai_result.get("top_matches"),
+                    low_pct=folder_low_pct,
+                    high_pct=folder_high_pct,
+                )
+                saved_path = _save_batch_file_for_foldering(
+                    batch_id=batch_id,
+                    expected_plu=expected_plu,
+                    category=category,
+                    filename=filename,
+                    file_bytes=file_bytes,
+                )
+                foldering_info["created_files"] += 1
+                foldering_info["categories"][category] = int(foldering_info["categories"].get(category, 0)) + 1
+                result_payload["folder_category"] = category
+                result_payload["folder_path"] = str(saved_path)
+                result_payload["foldering_meta"] = folder_meta
+            except Exception as exc:
+                foldering_info["failed_files"] += 1
+                logging.error(f"Batch foldering failed for {filename}: {exc}")
+                result_payload["folder_category"] = "folder_error"
+                result_payload["folder_path"] = ""
+                result_payload["foldering_meta"] = {
+                    "provider": AI_PROVIDER,
+                    "error": str(exc),
+                }
         if ai_result.get("fallback_local_match") is not None:
             result_payload["fallback_local_match"] = ai_result.get("fallback_local_match")
             result_payload["fallback_local_confidence"] = ai_result.get("fallback_local_confidence")
@@ -2550,10 +2688,16 @@ async def batch_validate(metadata: str = Form(...), files: List[UploadFile] = Fi
         "processed": len([r for r in results if r.get("status") in {"match", "mismatch"}]),
         "match_count": match_count,
         "mismatch_count": mismatch_count,
-        "error_count": error_count
+        "error_count": error_count,
+        "foldering_enabled": bool(foldering_enabled),
     }
 
-    return {"batch_id": batch_id, "summary": summary, "results": results}
+    return {
+        "batch_id": batch_id,
+        "summary": summary,
+        "results": results,
+        "foldering": foldering_info,
+    }
 
 # Get validation results
 @api_router.get("/validation/results")
