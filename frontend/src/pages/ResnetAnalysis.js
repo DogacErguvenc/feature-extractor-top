@@ -33,6 +33,7 @@ const toInt = (value, fallback) => {
 };
 
 const MAX_SAMPLE_LIMIT = 5000;
+const SAMPLE_RENDER_CHUNK = 200;
 
 const ResnetAnalysis = () => {
   const [loadingOverview, setLoadingOverview] = useState(true);
@@ -48,6 +49,7 @@ const ResnetAnalysis = () => {
   const [sampleLimitInput, setSampleLimitInput] = useState("60");
   const [sampleLimit, setSampleLimit] = useState(60);
   const [onlyLowConf, setOnlyLowConf] = useState(false);
+  const [renderedSampleCount, setRenderedSampleCount] = useState(SAMPLE_RENDER_CHUNK);
 
   const fetchOverview = async (thresholdValue = threshold) => {
     setLoadingOverview(true);
@@ -94,11 +96,13 @@ const ResnetAnalysis = () => {
         },
       });
       const payload = res.data || {};
+      const nextSamples = payload.samples || [];
       if (payload.summary) {
         setOverview(payload.summary);
       }
       setSelectedStats(payload.selected_plu || null);
-      setSamples(payload.samples || []);
+      setSamples(nextSamples);
+      setRenderedSampleCount(Math.min(nextSamples.length, SAMPLE_RENDER_CHUNK));
     } catch (error) {
       console.error("resnet detail error", error);
       toast.error("PLU analiz detaylari yuklenemedi");
@@ -125,6 +129,10 @@ const ResnetAnalysis = () => {
       return code.includes(query);
     });
   }, [perPlu, pluSearch]);
+  const visibleSamples = useMemo(
+    () => samples.slice(0, Math.max(0, renderedSampleCount)),
+    [samples, renderedSampleCount]
+  );
 
   const handleApplyFilters = async () => {
     const rawThreshold = Number(thresholdInput);
@@ -137,13 +145,22 @@ const ResnetAnalysis = () => {
     setThresholdInput(String(nextThreshold));
     setSampleLimitInput(String(nextLimit));
 
-    await fetchOverview(nextThreshold);
+    const shouldRefreshOverview = nextThreshold !== threshold;
+    if (shouldRefreshOverview) {
+      await Promise.all([
+        fetchOverview(nextThreshold),
+        fetchSelectedPlu(selectedPlu, nextThreshold, onlyLowConf, nextLimit),
+      ]);
+      return;
+    }
     await fetchSelectedPlu(selectedPlu, nextThreshold, onlyLowConf, nextLimit);
   };
 
   const handleRefresh = async () => {
-    await fetchOverview(threshold);
-    await fetchSelectedPlu(selectedPlu, threshold, onlyLowConf, sampleLimit);
+    await Promise.all([
+      fetchOverview(threshold),
+      fetchSelectedPlu(selectedPlu, threshold, onlyLowConf, sampleLimit),
+    ]);
   };
 
   const loading = loadingOverview || loadingDetails;
@@ -332,7 +349,7 @@ const ResnetAnalysis = () => {
             <CardHeader>
               <CardTitle>Ornek Kayitlar</CardTitle>
               <CardDescription>
-                Son {samples.length} kayit gosteriliyor.
+                Toplam {samples.length} kayittan {visibleSamples.length} gosteriliyor.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -340,7 +357,7 @@ const ResnetAnalysis = () => {
                 <p className="muted">Filtreye uygun kayit yok.</p>
               ) : (
                 <div className="resnet-sample-list">
-                  {samples.map((row) => (
+                  {visibleSamples.map((row) => (
                     <div className="resnet-sample-row" key={row.validation_id || `${row.timestamp}-${row.plu_code}`}>
                       <div className="resnet-sample-main">
                         <p className="file">{row.filename || "-"}</p>
@@ -358,6 +375,20 @@ const ResnetAnalysis = () => {
                       </div>
                     </div>
                   ))}
+                  {visibleSamples.length < samples.length && (
+                    <div className="resnet-sample-actions">
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          setRenderedSampleCount((current) =>
+                            Math.min(samples.length, current + SAMPLE_RENDER_CHUNK)
+                          )
+                        }
+                      >
+                        Daha Fazla Goster (+{SAMPLE_RENDER_CHUNK})
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>

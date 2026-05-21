@@ -658,6 +658,7 @@ async def ensure_database_indexes() -> None:
         await db.validation_results.create_index([("source", 1), ("plu_code", 1)], background=True)
         await db.validation_results.create_index([("ai_provider", 1), ("timestamp", -1)], background=True)
         await db.validation_results.create_index([("ai_provider", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
+        await db.validation_results.create_index([("ai_provider", 1), ("plu_code", 1), ("top_matches.plu_code", 1), ("timestamp", -1)], background=True)
         await db.captured_images.create_index([("timestamp", -1)], background=True)
         await db.captured_images.create_index([("plu_code", 1), ("timestamp", -1)], background=True)
     except Exception as e:
@@ -3326,35 +3327,50 @@ async def get_resnet_top5_analysis(
                 "sample_count": 0,
             }
 
-        sample_pipeline = [
-            {"$match": selected_match},
-            {"$project": metric_projection},
-            {"$match": {"plu_code": {"$ne": ""}}},
-            {"$addFields": metric_add_fields_1},
-            {"$addFields": metric_add_fields_2},
-            {"$addFields": metric_add_fields_3},
-            {"$addFields": metric_add_fields_4},
-        ]
+        sample_output_projection = {
+            "_id": 0,
+            "validation_id": "$id",
+            "timestamp": 1,
+            "plu_code": 1,
+            "filename": {"$ifNull": ["$original_filename", "$filename"]},
+            "predicted_plu": {"$ifNull": ["$analysis_predicted_plu", "$top1_code"]},
+            "top5_codes": 1,
+            "top1_score_pct": {"$round": ["$top1_score_pct", 2]},
+            "selected_score_pct": {"$round": ["$selected_score_pct", 2]},
+            "is_top5_match": 1,
+            "is_top1_match": 1,
+            "is_low_conf_top5": 1,
+        }
         if include_only_low_conf:
-            sample_pipeline.append({"$match": {"is_low_conf_top5": True}})
-        sample_pipeline.extend([
-            {"$sort": {"timestamp": -1}},
-            {"$limit": sample_limit},
-            {"$project": {
-                "_id": 0,
-                "validation_id": "$id",
-                "timestamp": 1,
-                "plu_code": 1,
-                "filename": {"$ifNull": ["$original_filename", "$filename"]},
-                "predicted_plu": {"$ifNull": ["$analysis_predicted_plu", "$top1_code"]},
-                "top5_codes": 1,
-                "top1_score_pct": {"$round": ["$top1_score_pct", 2]},
-                "selected_score_pct": {"$round": ["$selected_score_pct", 2]},
-                "is_top5_match": 1,
-                "is_top1_match": 1,
-                "is_low_conf_top5": 1,
-            }},
-        ])
+            sample_pipeline = [
+                {"$match": selected_match},
+                {"$match": {"top_matches.plu_code": selected_code}},
+                {"$project": metric_projection},
+                {"$match": {"plu_code": {"$ne": ""}}},
+                {"$addFields": metric_add_fields_1},
+                {"$addFields": metric_add_fields_2},
+                {"$addFields": metric_add_fields_3},
+                {"$addFields": metric_add_fields_4},
+                {"$match": {"is_low_conf_top5": True}},
+                {"$sort": {"timestamp": -1}},
+                {"$limit": sample_limit},
+                {"$project": sample_output_projection},
+            ]
+        else:
+            # Fast path: sort/limit first so Mongo can leverage
+            # (ai_provider, plu_code, timestamp) index.
+            sample_pipeline = [
+                {"$match": selected_match},
+                {"$sort": {"timestamp": -1}},
+                {"$limit": sample_limit},
+                {"$project": metric_projection},
+                {"$match": {"plu_code": {"$ne": ""}}},
+                {"$addFields": metric_add_fields_1},
+                {"$addFields": metric_add_fields_2},
+                {"$addFields": metric_add_fields_3},
+                {"$addFields": metric_add_fields_4},
+                {"$project": sample_output_projection},
+            ]
         samples = await db.validation_results.aggregate(sample_pipeline).to_list(sample_limit)
         if selected_stats is not None:
             selected_stats["sample_count"] = len(samples)
