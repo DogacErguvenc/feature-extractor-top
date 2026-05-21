@@ -88,10 +88,13 @@ const ResnetAnalysis = () => {
           low_conf_threshold_pct: thresholdValue,
           sample_limit: limit,
           include_only_low_conf: onlyLow,
+          include_overview: false,
         },
       });
       const payload = res.data || {};
-      setOverview(payload.summary || null);
+      if (payload.summary) {
+        setOverview(payload.summary);
+      }
       setSelectedStats(payload.selected_plu || null);
       setSamples(payload.samples || []);
     } catch (error) {

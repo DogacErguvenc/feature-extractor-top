@@ -3074,253 +3074,289 @@ async def get_resnet_top5_analysis(
     low_conf_threshold_pct: float = 35.0,
     sample_limit: int = 60,
     include_only_low_conf: bool = False,
+    include_overview: bool = True,
 ):
     threshold = max(0.0, min(float(low_conf_threshold_pct), 100.0))
     sample_limit = max(1, min(int(sample_limit), 300))
     selected_code = str(plu_code or "").strip()
+    base_match = {"ai_provider": "butcher_resnet"}
 
-    per_plu_pipeline = [
-        {"$match": {"ai_provider": "butcher_resnet"}},
-        {"$project": {
-            "_id": 0,
-            "plu_code": {"$toString": {"$ifNull": ["$plu_code", ""]}},
-            "timestamp": 1,
-            "top_matches": {
-                "$cond": [
-                    {"$isArray": "$top_matches"},
-                    {"$slice": ["$top_matches", 5]},
-                    [],
-                ]
-            },
-        }},
-        {"$match": {"plu_code": {"$ne": ""}}},
-        {"$addFields": {
-            "top5_codes": {
-                "$map": {
+    metric_projection = {
+        "_id": 0,
+        "id": 1,
+        "timestamp": 1,
+        "plu_code": {"$toString": {"$ifNull": ["$plu_code", ""]}},
+        "analysis_predicted_plu": 1,
+        "original_filename": 1,
+        "filename": 1,
+        "top_matches": {
+            "$cond": [
+                {"$isArray": "$top_matches"},
+                {"$slice": ["$top_matches", 5]},
+                [],
+            ]
+        },
+    }
+    metric_add_fields_1 = {
+        "top5_codes": {
+            "$map": {
+                "input": "$top_matches",
+                "as": "m",
+                "in": {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
+            }
+        },
+        "top1_match": {"$arrayElemAt": ["$top_matches", 0]},
+        "selected_match": {
+            "$first": {
+                "$filter": {
                     "input": "$top_matches",
                     "as": "m",
-                    "in": {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
-                }
-            },
-            "top1_match": {"$arrayElemAt": ["$top_matches", 0]},
-            "selected_match": {
-                "$first": {
-                    "$filter": {
-                        "input": "$top_matches",
-                        "as": "m",
-                        "cond": {
-                            "$eq": [
-                                {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
-                                {"$toString": {"$ifNull": ["$plu_code", ""]}},
-                            ]
-                        },
-                    }
-                }
-            },
-        }},
-        {"$addFields": {
-            "top1_code": {"$arrayElemAt": ["$top5_codes", 0]},
-            "is_top5_match": {"$in": ["$plu_code", "$top5_codes"]},
-            "top1_score_raw": {
-                "$convert": {
-                    "input": "$top1_match.score",
-                    "to": "double",
-                    "onError": None,
-                    "onNull": None,
-                }
-            },
-            "top1_prob_raw": {
-                "$convert": {
-                    "input": "$top1_match.prob",
-                    "to": "double",
-                    "onError": None,
-                    "onNull": None,
-                }
-            },
-            "selected_score_raw": {
-                "$convert": {
-                    "input": "$selected_match.score",
-                    "to": "double",
-                    "onError": None,
-                    "onNull": None,
-                }
-            },
-            "selected_prob_raw": {
-                "$convert": {
-                    "input": "$selected_match.prob",
-                    "to": "double",
-                    "onError": None,
-                    "onNull": None,
-                }
-            },
-        }},
-        {"$addFields": {
-            "is_top1_match": {"$eq": ["$plu_code", "$top1_code"]},
-            "top1_score_pct": {
-                "$ifNull": [
-                    "$top1_score_raw",
-                    {
-                        "$cond": [
-                            {"$ne": ["$top1_prob_raw", None]},
-                            {"$multiply": ["$top1_prob_raw", 100]},
-                            None,
+                    "cond": {
+                        "$eq": [
+                            {"$toString": {"$ifNull": ["$$m.plu_code", ""]}},
+                            {"$toString": {"$ifNull": ["$plu_code", ""]}},
                         ]
                     },
-                ]
-            },
-            "selected_score_pct": {
-                "$ifNull": [
-                    "$selected_score_raw",
-                    {
-                        "$cond": [
-                            {"$ne": ["$selected_prob_raw", None]},
-                            {"$multiply": ["$selected_prob_raw", 100]},
-                            None,
-                        ]
-                    },
-                ]
-            },
-        }},
-        {"$addFields": {
-            "is_low_conf_top5": {
-                "$and": [
-                    "$is_top5_match",
-                    {"$ne": ["$selected_score_pct", None]},
-                    {"$lt": ["$selected_score_pct", threshold]},
-                ]
-            },
-        }},
-        {"$group": {
-            "_id": "$plu_code",
-            "total": {"$sum": 1},
-            "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
-            "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
-            "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
-            "avg_top1_score_pct": {"$avg": "$top1_score_pct"},
-            "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
-            "top1_score_sum": {"$sum": {"$ifNull": ["$top1_score_pct", 0]}},
-            "top1_score_count": {"$sum": {"$cond": [{"$ne": ["$top1_score_pct", None]}, 1, 0]}},
-            "last_seen": {"$max": "$timestamp"},
-        }},
-        {"$sort": {"total": -1}},
-    ]
-    per_plu_docs = await db.validation_results.aggregate(per_plu_pipeline, allowDiskUse=True).to_list(10000)
-
-    per_plu_stats: List[dict] = []
-    total = 0
-    top5_match_total = 0
-    top1_match_total = 0
-    low_conf_top5_total = 0
-    top1_score_sum = 0.0
-    top1_score_count = 0
-
-    for item in per_plu_docs:
-        plu = str(item.get("_id") or "").strip()
-        plu_total = int(item.get("total") or 0)
-        top5_match_count = int(item.get("top5_match_count") or 0)
-        top1_match_count = int(item.get("top1_match_count") or 0)
-        low_conf_count = int(item.get("low_conf_top5_count") or 0)
-        top5_mismatch_count = max(0, plu_total - top5_match_count)
-
-        avg_top1_raw = item.get("avg_top1_score_pct")
-        avg_selected_raw = item.get("avg_selected_score_pct")
-        avg_top1 = round(float(avg_top1_raw), 2) if avg_top1_raw is not None else None
-        avg_selected = round(float(avg_selected_raw), 2) if avg_selected_raw is not None else None
-
-        per_plu_stats.append({
-            "plu_code": plu,
-            "total": plu_total,
-            "top5_match_count": top5_match_count,
-            "top5_mismatch_count": top5_mismatch_count,
-            "top5_match_rate": round((top5_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
-            "top1_match_count": top1_match_count,
-            "top1_match_rate": round((top1_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
-            "low_conf_top5_count": low_conf_count,
-            "low_conf_top5_rate": round((low_conf_count / plu_total) * 100.0, 2) if plu_total else 0.0,
-            "avg_top1_score_pct": avg_top1,
-            "avg_selected_score_pct": avg_selected,
-            "last_seen": item.get("last_seen"),
-        })
-
-        total += plu_total
-        top5_match_total += top5_match_count
-        top1_match_total += top1_match_count
-        low_conf_top5_total += low_conf_count
-        top1_score_sum += float(item.get("top1_score_sum") or 0.0)
-        top1_score_count += int(item.get("top1_score_count") or 0)
-
-    top5_mismatch_total = max(0, total - top5_match_total)
-    summary = {
-        "total": total,
-        "top5_match_count": top5_match_total,
-        "top5_mismatch_count": top5_mismatch_total,
-        "top5_match_rate": round((top5_match_total / total) * 100.0, 2) if total else 0.0,
-        "top1_match_count": top1_match_total,
-        "top1_match_rate": round((top1_match_total / total) * 100.0, 2) if total else 0.0,
-        "low_conf_top5_count": low_conf_top5_total,
-        "low_conf_top5_rate": round((low_conf_top5_total / total) * 100.0, 2) if total else 0.0,
-        "avg_top1_score_pct": round(top1_score_sum / top1_score_count, 2) if top1_score_count else None,
-        "distinct_plu_count": len(per_plu_stats),
+                }
+            }
+        },
     }
+    metric_add_fields_2 = {
+        "top1_code": {"$arrayElemAt": ["$top5_codes", 0]},
+        "is_top5_match": {"$in": ["$plu_code", "$top5_codes"]},
+        "top1_score_raw": {
+            "$convert": {
+                "input": "$top1_match.score",
+                "to": "double",
+                "onError": None,
+                "onNull": None,
+            }
+        },
+        "top1_prob_raw": {
+            "$convert": {
+                "input": "$top1_match.prob",
+                "to": "double",
+                "onError": None,
+                "onNull": None,
+            }
+        },
+        "selected_score_raw": {
+            "$convert": {
+                "input": "$selected_match.score",
+                "to": "double",
+                "onError": None,
+                "onNull": None,
+            }
+        },
+        "selected_prob_raw": {
+            "$convert": {
+                "input": "$selected_match.prob",
+                "to": "double",
+                "onError": None,
+                "onNull": None,
+            }
+        },
+    }
+    metric_add_fields_3 = {
+        "is_top1_match": {"$eq": ["$plu_code", "$top1_code"]},
+        "top1_score_pct": {
+            "$ifNull": [
+                "$top1_score_raw",
+                {
+                    "$cond": [
+                        {"$ne": ["$top1_prob_raw", None]},
+                        {"$multiply": ["$top1_prob_raw", 100]},
+                        None,
+                    ]
+                },
+            ]
+        },
+        "selected_score_pct": {
+            "$ifNull": [
+                "$selected_score_raw",
+                {
+                    "$cond": [
+                        {"$ne": ["$selected_prob_raw", None]},
+                        {"$multiply": ["$selected_prob_raw", 100]},
+                        None,
+                    ]
+                },
+            ]
+        },
+    }
+    metric_add_fields_4 = {
+        "is_low_conf_top5": {
+            "$and": [
+                "$is_top5_match",
+                {"$ne": ["$selected_score_pct", None]},
+                {"$lt": ["$selected_score_pct", threshold]},
+            ]
+        },
+    }
+
+    summary = None
+    per_plu_stats: List[dict] = []
+
+    if include_overview:
+        per_plu_pipeline = [
+            {"$match": base_match},
+            {"$project": metric_projection},
+            {"$match": {"plu_code": {"$ne": ""}}},
+            {"$addFields": metric_add_fields_1},
+            {"$addFields": metric_add_fields_2},
+            {"$addFields": metric_add_fields_3},
+            {"$addFields": metric_add_fields_4},
+            {"$group": {
+                "_id": "$plu_code",
+                "total": {"$sum": 1},
+                "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
+                "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
+                "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
+                "avg_top1_score_pct": {"$avg": "$top1_score_pct"},
+                "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
+                "top1_score_sum": {"$sum": {"$ifNull": ["$top1_score_pct", 0]}},
+                "top1_score_count": {"$sum": {"$cond": [{"$ne": ["$top1_score_pct", None]}, 1, 0]}},
+                "last_seen": {"$max": "$timestamp"},
+            }},
+            {"$sort": {"total": -1}},
+        ]
+        per_plu_docs = await db.validation_results.aggregate(per_plu_pipeline, allowDiskUse=True).to_list(10000)
+
+        total = 0
+        top5_match_total = 0
+        top1_match_total = 0
+        low_conf_top5_total = 0
+        top1_score_sum = 0.0
+        top1_score_count = 0
+
+        for item in per_plu_docs:
+            plu = str(item.get("_id") or "").strip()
+            plu_total = int(item.get("total") or 0)
+            top5_match_count = int(item.get("top5_match_count") or 0)
+            top1_match_count = int(item.get("top1_match_count") or 0)
+            low_conf_count = int(item.get("low_conf_top5_count") or 0)
+            top5_mismatch_count = max(0, plu_total - top5_match_count)
+
+            avg_top1_raw = item.get("avg_top1_score_pct")
+            avg_selected_raw = item.get("avg_selected_score_pct")
+            avg_top1 = round(float(avg_top1_raw), 2) if avg_top1_raw is not None else None
+            avg_selected = round(float(avg_selected_raw), 2) if avg_selected_raw is not None else None
+
+            per_plu_stats.append({
+                "plu_code": plu,
+                "total": plu_total,
+                "top5_match_count": top5_match_count,
+                "top5_mismatch_count": top5_mismatch_count,
+                "top5_match_rate": round((top5_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+                "top1_match_count": top1_match_count,
+                "top1_match_rate": round((top1_match_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+                "low_conf_top5_count": low_conf_count,
+                "low_conf_top5_rate": round((low_conf_count / plu_total) * 100.0, 2) if plu_total else 0.0,
+                "avg_top1_score_pct": avg_top1,
+                "avg_selected_score_pct": avg_selected,
+                "last_seen": item.get("last_seen"),
+            })
+
+            total += plu_total
+            top5_match_total += top5_match_count
+            top1_match_total += top1_match_count
+            low_conf_top5_total += low_conf_count
+            top1_score_sum += float(item.get("top1_score_sum") or 0.0)
+            top1_score_count += int(item.get("top1_score_count") or 0)
+
+        top5_mismatch_total = max(0, total - top5_match_total)
+        summary = {
+            "total": total,
+            "top5_match_count": top5_match_total,
+            "top5_mismatch_count": top5_mismatch_total,
+            "top5_match_rate": round((top5_match_total / total) * 100.0, 2) if total else 0.0,
+            "top1_match_count": top1_match_total,
+            "top1_match_rate": round((top1_match_total / total) * 100.0, 2) if total else 0.0,
+            "low_conf_top5_count": low_conf_top5_total,
+            "low_conf_top5_rate": round((low_conf_top5_total / total) * 100.0, 2) if total else 0.0,
+            "avg_top1_score_pct": round(top1_score_sum / top1_score_count, 2) if top1_score_count else None,
+            "distinct_plu_count": len(per_plu_stats),
+        }
 
     selected_stats = None
     samples: List[dict] = []
 
     if selected_code:
-        selected_query = {
+        selected_match = {
             "ai_provider": "butcher_resnet",
             "plu_code": selected_code,
         }
-        projection = {
-            "_id": 0,
-            "id": 1,
-            "timestamp": 1,
-            "plu_code": 1,
-            "top_matches": 1,
-            "analysis_predicted_plu": 1,
-            "original_filename": 1,
-            "filename": 1,
-        }
-        cursor = db.validation_results.find(selected_query, projection).sort("timestamp", -1)
+        selected_stats_pipeline = [
+            {"$match": selected_match},
+            {"$project": metric_projection},
+            {"$match": {"plu_code": {"$ne": ""}}},
+            {"$addFields": metric_add_fields_1},
+            {"$addFields": metric_add_fields_2},
+            {"$addFields": metric_add_fields_3},
+            {"$addFields": metric_add_fields_4},
+            {"$group": {
+                "_id": "$plu_code",
+                "total": {"$sum": 1},
+                "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
+                "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
+                "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
+                "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
+            }},
+        ]
+        selected_docs = await db.validation_results.aggregate(selected_stats_pipeline).to_list(1)
+        if selected_docs:
+            s = selected_docs[0]
+            s_total = int(s.get("total") or 0)
+            s_top5_match = int(s.get("top5_match_count") or 0)
+            s_top1_match = int(s.get("top1_match_count") or 0)
+            s_low_conf_top5 = int(s.get("low_conf_top5_count") or 0)
+            avg_selected_raw = s.get("avg_selected_score_pct")
+            selected_stats = {
+                "plu_code": selected_code,
+                "total": s_total,
+                "top5_match_count": s_top5_match,
+                "top5_mismatch_count": max(0, s_total - s_top5_match),
+                "top5_match_rate": round((s_top5_match / s_total) * 100.0, 2) if s_total else 0.0,
+                "top1_match_count": s_top1_match,
+                "top1_match_rate": round((s_top1_match / s_total) * 100.0, 2) if s_total else 0.0,
+                "low_conf_top5_count": s_low_conf_top5,
+                "low_conf_top5_rate": round((s_low_conf_top5 / s_total) * 100.0, 2) if s_total else 0.0,
+                "avg_selected_score_pct": round(float(avg_selected_raw), 2) if avg_selected_raw is not None else None,
+                "sample_count": 0,
+            }
 
-        s_total = 0
-        s_top5_match = 0
-        s_top1_match = 0
-        s_low_conf_top5 = 0
-        s_selected_score_sum = 0.0
-        s_selected_score_count = 0
-
-        async for doc in cursor:
-            row = _extract_resnet_metrics_for_plu(doc, selected_code, threshold)
-            s_total += 1
-            if row["is_top5_match"]:
-                s_top5_match += 1
-            if row["is_top1_match"]:
-                s_top1_match += 1
-            if row["is_low_conf_top5"]:
-                s_low_conf_top5 += 1
-            if row["selected_score_pct"] is not None:
-                s_selected_score_sum += float(row["selected_score_pct"])
-                s_selected_score_count += 1
-
-            if include_only_low_conf and not row["is_low_conf_top5"]:
-                continue
-            if len(samples) < sample_limit:
-                samples.append(row)
-
-        selected_stats = {
-            "plu_code": selected_code,
-            "total": s_total,
-            "top5_match_count": s_top5_match,
-            "top5_mismatch_count": max(0, s_total - s_top5_match),
-            "top5_match_rate": round((s_top5_match / s_total) * 100.0, 2) if s_total else 0.0,
-            "top1_match_count": s_top1_match,
-            "top1_match_rate": round((s_top1_match / s_total) * 100.0, 2) if s_total else 0.0,
-            "low_conf_top5_count": s_low_conf_top5,
-            "low_conf_top5_rate": round((s_low_conf_top5 / s_total) * 100.0, 2) if s_total else 0.0,
-            "avg_selected_score_pct": round(s_selected_score_sum / s_selected_score_count, 2) if s_selected_score_count else None,
-            "sample_count": len(samples),
-        }
+        sample_pipeline = [
+            {"$match": selected_match},
+            {"$project": metric_projection},
+            {"$match": {"plu_code": {"$ne": ""}}},
+            {"$addFields": metric_add_fields_1},
+            {"$addFields": metric_add_fields_2},
+            {"$addFields": metric_add_fields_3},
+            {"$addFields": metric_add_fields_4},
+        ]
+        if include_only_low_conf:
+            sample_pipeline.append({"$match": {"is_low_conf_top5": True}})
+        sample_pipeline.extend([
+            {"$sort": {"timestamp": -1}},
+            {"$limit": sample_limit},
+            {"$project": {
+                "_id": 0,
+                "validation_id": "$id",
+                "timestamp": 1,
+                "plu_code": 1,
+                "filename": {"$ifNull": ["$original_filename", "$filename"]},
+                "predicted_plu": {"$ifNull": ["$analysis_predicted_plu", "$top1_code"]},
+                "top5_codes": 1,
+                "top1_score_pct": {"$round": ["$top1_score_pct", 2]},
+                "selected_score_pct": {"$round": ["$selected_score_pct", 2]},
+                "is_top5_match": 1,
+                "is_top1_match": 1,
+                "is_low_conf_top5": 1,
+            }},
+        ])
+        samples = await db.validation_results.aggregate(sample_pipeline).to_list(sample_limit)
+        if selected_stats is not None:
+            selected_stats["sample_count"] = len(samples)
 
     return {
         "query": {
@@ -3328,6 +3364,7 @@ async def get_resnet_top5_analysis(
             "low_conf_threshold_pct": threshold,
             "sample_limit": sample_limit,
             "include_only_low_conf": bool(include_only_low_conf),
+            "include_overview": bool(include_overview),
         },
         "summary": summary,
         "per_plu": per_plu_stats,
