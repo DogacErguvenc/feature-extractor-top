@@ -82,6 +82,7 @@ PLU_MIN_EMBEDDINGS = int(os.environ.get('PLU_MIN_EMBEDDINGS', '40'))
 BATCH_FOLDERING_ROOT = Path(os.environ.get('BATCH_FOLDERING_ROOT', ROOT_DIR / "batch_foldering")).resolve()
 BATCH_FOLDERING_LOW_PCT = float(os.environ.get('BATCH_FOLDERING_LOW_PCT', '40'))
 BATCH_FOLDERING_HIGH_PCT = float(os.environ.get('BATCH_FOLDERING_HIGH_PCT', '70'))
+RESNET_ANALYSIS_MAX_SAMPLE_LIMIT = int(os.environ.get('RESNET_ANALYSIS_MAX_SAMPLE_LIMIT', '5000'))
 _raw_plu_budget_path = os.environ.get('PLU_BUDGETS_PATH', '').strip()
 _default_plu_budget_path = (ROOT_DIR / "plu_budgets.json")
 if _raw_plu_budget_path:
@@ -3077,7 +3078,7 @@ async def get_resnet_top5_analysis(
     include_overview: bool = True,
 ):
     threshold = max(0.0, min(float(low_conf_threshold_pct), 100.0))
-    sample_limit = max(1, min(int(sample_limit), 300))
+    sample_limit = max(1, min(int(sample_limit), max(1, RESNET_ANALYSIS_MAX_SAMPLE_LIMIT)))
     selected_code = str(plu_code or "").strip()
     base_match = {"ai_provider": "butcher_resnet"}
 

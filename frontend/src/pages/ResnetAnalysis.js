@@ -32,6 +32,8 @@ const toInt = (value, fallback) => {
   return Number.isFinite(num) ? Math.floor(num) : fallback;
 };
 
+const MAX_SAMPLE_LIMIT = 5000;
+
 const ResnetAnalysis = () => {
   const [loadingOverview, setLoadingOverview] = useState(true);
   const [loadingDetails, setLoadingDetails] = useState(false);
@@ -129,7 +131,7 @@ const ResnetAnalysis = () => {
     const nextThreshold = Number.isFinite(rawThreshold)
       ? Math.max(0, Math.min(100, rawThreshold))
       : 35;
-    const nextLimit = Math.max(1, Math.min(300, toInt(sampleLimitInput, 60)));
+    const nextLimit = Math.max(1, Math.min(MAX_SAMPLE_LIMIT, toInt(sampleLimitInput, 60)));
     setThreshold(nextThreshold);
     setSampleLimit(nextLimit);
     setThresholdInput(String(nextThreshold));
@@ -257,7 +259,7 @@ const ResnetAnalysis = () => {
                   <input
                     type="number"
                     min="1"
-                    max="300"
+                    max={MAX_SAMPLE_LIMIT}
                     value={sampleLimitInput}
                     onChange={(e) => setSampleLimitInput(e.target.value)}
                   />
