@@ -42,11 +42,6 @@ const Dashboard = () => {
     return model ? `${base} / ${model}` : base;
   };
 
-  const formatDuration = (ms) => {
-    if (ms === null || ms === undefined) return "-";
-    return `${ms} ms`;
-  };
-
   const formatSimilarityPercent = (rawValue) => {
     if (rawValue === null || rawValue === undefined || rawValue === "") return "-";
     const num = Number(rawValue);
@@ -65,17 +60,19 @@ const Dashboard = () => {
     return `${raw.toFixed(1)}%`;
   };
 
-  const summarizeTopMatches = (matches, limit = 3) => {
-    if (!Array.isArray(matches) || matches.length === 0) return "-";
-    return matches
-      .slice(0, limit)
-      .map((match, idx) => {
+  const renderTopMatches = (matches, limit = 3) => (
+    <ol className="top-matches-list">
+      {matches.slice(0, limit).map((match, idx) => {
         const rank = match?.rank ?? idx + 1;
         const pluCode = match?.plu_code || "?";
-        return `${rank}. ${pluCode} (${formatTopMatchScore(match)})`;
-      })
-      .join(" | ");
-  };
+        return (
+          <li key={`${rank}-${pluCode}-${idx}`} value={rank}>
+            {pluCode} ({formatTopMatchScore(match)})
+          </li>
+        );
+      })}
+    </ol>
+  );
 
   const isResnetTopKResult = (result) => result?.source === "resnet_topk";
 
@@ -582,23 +579,16 @@ const Dashboard = () => {
                       <p className="model-chip" data-testid={`validation-model-${result.id}`}>
                         Model: {formatModel(result.ai_provider, result.ai_model)}
                       </p>
-                      <p className="model-chip" data-testid={`validation-duration-${result.id}`}>
-                        Süre: {result.processing_ms !== undefined && result.processing_ms !== null ? `${result.processing_ms} ms` : "-"}
-                      </p>
                       {!isTopKOnly && !result.is_match && result.analysis_predicted_plu && (
                         <p className="model-chip" data-testid={`validation-nearest-plu-${result.id}`}>
                           En yakin PLU: {result.analysis_predicted_plu} ({formatSimilarityPercent(result.analysis_predicted_score)})
                         </p>
                       )}
                       {Array.isArray(result.top_matches) && result.top_matches.length > 0 && (
-                        <p className="model-chip" data-testid={`validation-top-matches-${result.id}`}>
-                          Top {topMatchesLimitFor(result)} benzer: {summarizeTopMatches(result.top_matches, topMatchesLimitFor(result))}
-                        </p>
-                      )}
-                      {result.has_processed_image && (
-                        <p className="model-chip" data-testid={`validation-roi-${result.id}`}>
-                          ROI: crop kaydi var
-                        </p>
+                        <div className="model-chip" data-testid={`validation-top-matches-${result.id}`}>
+                          <strong>Top {topMatchesLimitFor(result)} benzer:</strong>
+                          {renderTopMatches(result.top_matches, topMatchesLimitFor(result))}
+                        </div>
                       )}
                       {(result.ai_provider === "local_gemini" || result.ai_provider === "local_gemini_consensus") && (
                         <div className="fallback-details">
@@ -610,16 +600,6 @@ const Dashboard = () => {
                           </p>
                         </div>
                       )}
-
-                      <div className="confidence-bar">
-                        <div className="confidence-label" data-testid={`validation-confidence-${result.id}`}>{isTopKOnly ? "Top-1 Skor" : "Güven"}: {result.confidence}%</div>
-                        <div className="confidence-progress">
-                          <div
-                            className="confidence-fill"
-                            style={{width: `${result.confidence}%`}}
-                          ></div>
-                        </div>
-                      </div>
                     </CardContent>
                   </Card>
                 );
@@ -923,9 +903,10 @@ const Dashboard = () => {
                           </p>
                         )}
                         {Array.isArray(modalData?.top_matches) && modalData.top_matches.length > 0 && (
-                          <p>
-                            <strong>Top {topMatchesLimitFor(modalData)} benzer:</strong> {summarizeTopMatches(modalData.top_matches, topMatchesLimitFor(modalData))}
-                          </p>
+                          <div>
+                            <strong>Top {topMatchesLimitFor(modalData)} benzer:</strong>
+                            {renderTopMatches(modalData.top_matches, topMatchesLimitFor(modalData))}
+                          </div>
                         )}
                         <p>
                           <strong>Goruntu:</strong>{" "}
