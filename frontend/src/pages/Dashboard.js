@@ -11,6 +11,72 @@ const IMAGE_PAGE_SIZE = 20;
 const VALIDATION_PAGE_SIZE = 20;
 const REF_CANDIDATE_PAGE_SIZE = 20;
 
+const getVisiblePages = (currentPage, totalPages) => {
+  const visibleCount = Math.min(5, totalPages);
+  const maxStart = Math.max(1, totalPages - visibleCount + 1);
+  const start = Math.min(
+    Math.max(1, currentPage - Math.floor(visibleCount / 2)),
+    maxStart
+  );
+
+  return Array.from({ length: visibleCount }, (_, index) => start + index);
+};
+
+const DashboardPagination = ({ currentPage, totalPages, loading, onPageChange }) => {
+  const pages = getVisiblePages(currentPage, totalPages);
+
+  return (
+    <div className="data-pagination">
+      <div className="pagination-controls">
+        <button
+          type="button"
+          className="pagination-button pagination-arrow"
+          aria-label="Onceki sayfa"
+          onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage <= 1 || loading}
+        >
+          &larr;
+        </button>
+        {pages.map((page) => (
+          <button
+            type="button"
+            key={page}
+            className={`pagination-button ${page === currentPage ? "active" : ""}`}
+            aria-current={page === currentPage ? "page" : undefined}
+            onClick={() => onPageChange(page)}
+            disabled={loading}
+          >
+            {page}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="pagination-button pagination-arrow"
+          aria-label="Sonraki sayfa"
+          onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
+          disabled={currentPage >= totalPages || loading}
+        >
+          &rarr;
+        </button>
+      </div>
+      <label className="pagination-jump">
+        <span>Sayfaya git:</span>
+        <select
+          value={currentPage}
+          onChange={(event) => onPageChange(Number(event.target.value))}
+          disabled={loading}
+        >
+          {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+};
+
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
   const [validationResults, setValidationResults] = useState([]);
@@ -32,6 +98,7 @@ const Dashboard = () => {
   const [health, setHealth] = useState(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [refCandidates, setRefCandidates] = useState([]);
+  const [refCandidateStats, setRefCandidateStats] = useState({});
   const [refCandidatesPage, setRefCandidatesPage] = useState(1);
   const [refCandidatesLoading, setRefCandidatesLoading] = useState(false);
   const [refCandidatesStatus, setRefCandidatesStatus] = useState("pending");
@@ -122,6 +189,14 @@ const Dashboard = () => {
     }
   }, [stats, validationsPage]);
 
+  useEffect(() => {
+    const total = refCandidateStats[refCandidatesStatus] ?? 0;
+    const maxPage = Math.max(1, Math.ceil(total / REF_CANDIDATE_PAGE_SIZE));
+    if (refCandidatesPage > maxPage) {
+      setRefCandidatesPage(maxPage);
+    }
+  }, [refCandidateStats, refCandidatesPage, refCandidatesStatus]);
+
   const fetchDashboardData = async () => {
     try {
       const [statsRes, modeRes, aiRes] = await Promise.all([
@@ -177,10 +252,12 @@ const Dashboard = () => {
     setRefCandidatesLoading(true);
     try {
       const skip = (page - 1) * REF_CANDIDATE_PAGE_SIZE;
-      const res = await axios.get(
-        `${API}/ref-candidates?status=${status}&limit=${REF_CANDIDATE_PAGE_SIZE}&skip=${skip}`
-      );
-      setRefCandidates(res.data || []);
+      const [candidatesRes, statsRes] = await Promise.all([
+        axios.get(`${API}/ref-candidates?status=${status}&limit=${REF_CANDIDATE_PAGE_SIZE}&skip=${skip}`),
+        axios.get(`${API}/ref-candidates/stats`)
+      ]);
+      setRefCandidates(candidatesRes.data || []);
+      setRefCandidateStats(statsRes.data || {});
     } catch (error) {
       console.error("Error fetching ref candidates:", error);
       toast.error("Ref aday listesi yuklenemedi");
@@ -324,6 +401,8 @@ const Dashboard = () => {
   const imagesTotalPages = Math.max(1, Math.ceil(totalImages / IMAGE_PAGE_SIZE));
   const totalValidations = stats?.total_validations ?? 0;
   const validationsTotalPages = Math.max(1, Math.ceil(totalValidations / VALIDATION_PAGE_SIZE));
+  const totalRefCandidates = refCandidateStats[refCandidatesStatus] ?? 0;
+  const refCandidatesTotalPages = Math.max(1, Math.ceil(totalRefCandidates / REF_CANDIDATE_PAGE_SIZE));
 
   if (loading) {
     return (
@@ -471,7 +550,7 @@ const Dashboard = () => {
         <TabsList>
           <TabsTrigger value="images" data-testid="images-tab">Fotoğraflar ({totalImages || capturedImages.length})</TabsTrigger>
           <TabsTrigger value="validations" data-testid="validations-tab">AI Kontrolleri ({totalValidations || validationResults.length})</TabsTrigger>
-          <TabsTrigger value="ref-candidates" data-testid="ref-candidates-tab">Ref Adaylari ({refCandidates.length})</TabsTrigger>
+          <TabsTrigger value="ref-candidates" data-testid="ref-candidates-tab">Ref Adaylari ({totalRefCandidates})</TabsTrigger>
           <TabsTrigger value="plu-stats" data-testid="plu-stats-tab">PLU istatistikleri</TabsTrigger>
           <TabsTrigger value="health" data-testid="health-tab">Sistem Durumu</TabsTrigger>
         </TabsList>
@@ -515,25 +594,12 @@ const Dashboard = () => {
             )}
           </div>
           {capturedImages.length > 0 && (
-            <div className="data-pagination">
-              <Button
-                variant="outline"
-                onClick={() => setImagesPage((page) => Math.max(1, page - 1))}
-                disabled={imagesPage <= 1 || imagesLoading}
-              >
-                Onceki
-              </Button>
-              <span className="page-info">
-                Sayfa {imagesPage} / {imagesTotalPages}
-              </span>
-              <Button
-                variant="outline"
-                onClick={() => setImagesPage((page) => Math.min(imagesTotalPages, page + 1))}
-                disabled={imagesPage >= imagesTotalPages || imagesLoading}
-              >
-                Sonraki
-              </Button>
-            </div>
+            <DashboardPagination
+              currentPage={imagesPage}
+              totalPages={imagesTotalPages}
+              loading={imagesLoading}
+              onPageChange={setImagesPage}
+            />
           )}
         </TabsContent>
         
@@ -607,25 +673,12 @@ const Dashboard = () => {
             )}
           </div>
           {validationResults.length > 0 && (
-            <div className="data-pagination">
-              <Button
-                variant="outline"
-                onClick={() => setValidationsPage((page) => Math.max(1, page - 1))}
-                disabled={validationsPage <= 1 || validationsLoading}
-              >
-                Onceki
-              </Button>
-              <span className="page-info">
-                Sayfa {validationsPage} / {validationsTotalPages}
-              </span>
-              <Button
-                variant="outline"
-                onClick={() => setValidationsPage((page) => Math.min(validationsTotalPages, page + 1))}
-                disabled={validationsPage >= validationsTotalPages || validationsLoading}
-              >
-                Sonraki
-              </Button>
-            </div>
+            <DashboardPagination
+              currentPage={validationsPage}
+              totalPages={validationsTotalPages}
+              loading={validationsLoading}
+              onPageChange={setValidationsPage}
+            />
           )}
         </TabsContent>
 
@@ -720,25 +773,12 @@ const Dashboard = () => {
             )}
           </div>
           {refCandidates.length > 0 && (
-            <div className="data-pagination">
-              <Button
-                variant="outline"
-                onClick={() => setRefCandidatesPage((page) => Math.max(1, page - 1))}
-                disabled={refCandidatesPage <= 1 || refCandidatesLoading}
-              >
-                Onceki
-              </Button>
-              <span className="page-info">
-                Sayfa {refCandidatesPage}
-              </span>
-              <Button
-                variant="outline"
-                onClick={() => setRefCandidatesPage((page) => page + 1)}
-                disabled={refCandidatesLoading}
-              >
-                Sonraki
-              </Button>
-            </div>
+            <DashboardPagination
+              currentPage={refCandidatesPage}
+              totalPages={refCandidatesTotalPages}
+              loading={refCandidatesLoading}
+              onPageChange={setRefCandidatesPage}
+            />
           )}
         </TabsContent>
         

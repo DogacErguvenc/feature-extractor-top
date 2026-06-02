@@ -2837,6 +2837,15 @@ async def list_ref_candidates(status: Optional[str] = None, limit: int = 50, ski
     return [RefCandidate(**cand) for cand in candidates]
 
 
+@api_router.get("/ref-candidates/stats")
+async def ref_candidate_stats():
+    pipeline = [
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+    ]
+    stats = await db.ref_candidates.aggregate(pipeline).to_list(10)
+    return {item["_id"]: item["count"] for item in stats}
+
+
 @api_router.get("/ref-candidates/{candidate_id}", response_model=RefCandidate)
 async def get_ref_candidate(candidate_id: str):
     cand = await db.ref_candidates.find_one({"id": candidate_id}, {"_id": 0})
@@ -2921,14 +2930,6 @@ async def reject_ref_candidate(candidate_id: str, payload: RefCandidateReview = 
     cand["rejected_at"] = datetime.fromisoformat(cand["rejected_at"])
     return RefCandidate(**cand)
 
-
-@api_router.get("/ref-candidates/stats")
-async def ref_candidate_stats():
-    pipeline = [
-        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
-    ]
-    stats = await db.ref_candidates.aggregate(pipeline).to_list(10)
-    return {item["_id"]: item["count"] for item in stats}
 
 # System mode management
 @api_router.post("/system/mode")
