@@ -144,7 +144,11 @@ const Dashboard = () => {
   const isResnetTopKResult = (result) => result?.source === "resnet_topk";
 
   const topMatchesLimitFor = (result) => (
-    isResnetTopKResult(result) || result?.ai_provider === "butcher_resnet" ? 5 : 3
+    isResnetTopKResult(result) ||
+    result?.ai_provider === "butcher_resnet" ||
+    result?.ai_provider === "butcher_resnet_embedding"
+      ? 5
+      : 3
   );
 
   useEffect(() => {
@@ -306,7 +310,8 @@ const Dashboard = () => {
       provider === "local" ||
       provider === "local_large" ||
       provider === "local_embedding" ||
-      provider === "butcher_resnet"
+      provider === "butcher_resnet" ||
+      provider === "butcher_resnet_embedding"
     ) {
       setAiConfig({ provider, model: "" });
     } else if (
@@ -448,6 +453,7 @@ const Dashboard = () => {
               <option value="local_large">Local (Large ONNX)</option>
               <option value="local_embedding">Local (Embedding)</option>
               <option value="butcher_resnet">Butcher ResNet18 (Birebir)</option>
+              <option value="butcher_resnet_embedding">Butcher ResNet18 (Embedding)</option>
               <option value="local_gemini">Local + Gemini (fallback)</option>
               <option value="local_gemini_consensus">Local + Gemini (consensus)</option>
               <option value="gemini">Gemini</option>

@@ -11,6 +11,7 @@ const LIVE_SUPPORTED_PROVIDERS = new Set([
   "local_large",
   "local_embedding",
   "butcher_resnet",
+  "butcher_resnet_embedding",
 ]);
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -156,7 +157,7 @@ const ScaleOperator = () => {
     const cfg = await fetchAIConfig();
     if (!LIVE_SUPPORTED_PROVIDERS.has(cfg.provider)) {
       toast.error(
-        `Canli tahmin icin model local/local_large/local_embedding/butcher_resnet olmali. Su an: ${cfg.provider || "belirsiz"}`
+        `Canli tahmin icin model local/local_large/local_embedding/butcher_resnet/butcher_resnet_embedding olmali. Su an: ${cfg.provider || "belirsiz"}`
       );
       return;
     }

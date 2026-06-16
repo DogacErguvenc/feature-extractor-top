@@ -37,7 +37,7 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 # Choose which AI provider to use
-# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_embedding', 'butcher_resnet', 'local_gemini', 'local_gemini_consensus'
+# Supported: 'gemini', 'openai', 'local', 'local_large', 'local_embedding', 'butcher_resnet', 'butcher_resnet_embedding', 'local_gemini', 'local_gemini_consensus'
 AI_PROVIDER = os.environ.get('AI_PROVIDER', 'gemini')
 AI_MODEL = os.environ.get('AI_MODEL', 'gemini-2.0-flash')  # Model name
 LOCAL_MODEL_PATH = Path(os.environ.get('LOCAL_MODEL_PATH', ROOT_DIR / "models" / "local_model.onnx"))
@@ -48,6 +48,11 @@ LOCAL_SMALL_IMAGE_SIZE = int(os.environ.get('LOCAL_SMALL_IMAGE_SIZE', '224'))
 LOCAL_LARGE_IMAGE_SIZE = int(os.environ.get('LOCAL_LARGE_IMAGE_SIZE', '300'))
 BUTCHER_CONFIG_PATH = Path(os.environ.get('BUTCHER_CONFIG_PATH', ROOT_DIR / "butcher_config.yaml")).resolve()
 BUTCHER_TOP_K = int(os.environ.get('BUTCHER_TOP_K', '3'))
+BUTCHER_EMBEDDING_STORE_DIR = Path(os.environ.get('BUTCHER_EMBEDDING_STORE_DIR', ROOT_DIR / "butcher_embedding_store")).resolve()
+BUTCHER_EMBEDDING_TOP_N = int(os.environ.get('BUTCHER_EMBEDDING_TOP_N', '5'))
+BUTCHER_EMBEDDING_SCORE_K = int(os.environ.get('BUTCHER_EMBEDDING_SCORE_K', '3'))
+BUTCHER_EMBEDDING_MIN_SIM = float(os.environ.get('BUTCHER_EMBEDDING_MIN_SIM', '0.35'))
+BUTCHER_EMBEDDING_MARGIN = float(os.environ.get('BUTCHER_EMBEDDING_MARGIN', '0.05'))
 REFERENCE_IMAGE_DIR = Path(os.environ.get('REFERENCE_IMAGE_DIR', ROOT_DIR / "reference_images")).resolve()
 REFERENCE_MAX_IMAGES = int(os.environ.get('REFERENCE_MAX_IMAGES', '2'))
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'dense_v1')
@@ -385,6 +390,7 @@ LOCAL_MODEL_CACHE: dict[str, Tuple[ort.InferenceSession, str, List[dict]]] = {}
 EMBEDDING_ENGINE = None
 EMBEDDING_STORE = None
 EMBEDDING_STORE_LOCK = asyncio.Lock()
+BUTCHER_EMBEDDING_STORE = None
 BOOTSTRAP_POOL_LOCK = asyncio.Lock()
 
 # Pydantic Models
@@ -768,6 +774,16 @@ def get_embedding_store():
 
     EMBEDDING_STORE = EmbeddingStore.load(EMBEDDING_STORE_DIR)
     return EMBEDDING_STORE
+
+
+def get_butcher_embedding_store():
+    global BUTCHER_EMBEDDING_STORE
+    if BUTCHER_EMBEDDING_STORE is not None:
+        return BUTCHER_EMBEDDING_STORE
+    from embedding_store import EmbeddingStore
+
+    BUTCHER_EMBEDDING_STORE = EmbeddingStore.load(BUTCHER_EMBEDDING_STORE_DIR)
+    return BUTCHER_EMBEDDING_STORE
 
 
 
@@ -1469,6 +1485,87 @@ async def run_embedding_inference(image_base64: str, plu_product: PLUProduct) ->
         "confidence": result["confidence"],
         "top_matches": top_matches,
     }
+
+
+async def run_butcher_resnet_embedding_inference(
+    image_base64: str,
+    plu_product: PLUProduct,
+) -> dict:
+    """Run cosine similarity on frozen features from the existing Butcher ResNet18 checkpoint."""
+    from butcher_runtime import embed_base64_image
+
+    store = get_butcher_embedding_store()
+    vec = await asyncio.to_thread(embed_base64_image, image_base64, BUTCHER_CONFIG_PATH)
+    vec = vec.astype("float32")
+    query_embeddings = vec[None, :]
+    top_matches = await asyncio.to_thread(
+        _build_embedding_top_matches,
+        store,
+        query_embeddings,
+        BUTCHER_EMBEDDING_SCORE_K,
+        BUTCHER_EMBEDDING_TOP_N,
+    )
+
+    try:
+        result = await asyncio.to_thread(
+            store.score_query,
+            query_embeddings,
+            plu_product.plu_code,
+            BUTCHER_EMBEDDING_SCORE_K,
+            BUTCHER_EMBEDDING_MIN_SIM,
+            BUTCHER_EMBEDDING_MARGIN,
+        )
+    except Exception as exc:
+        predicted = top_matches[0] if top_matches else {}
+        predicted_score = predicted.get("score")
+        confidence = 0.0
+        try:
+            confidence = float(np.clip(float(predicted_score), 0.0, 1.0) * 100.0)
+        except Exception:
+            confidence = 0.0
+        return {
+            "analysis": f"ResNet embedding check skipped selected PLU scoring: {exc}",
+            "analysis_selected_plu": str(plu_product.plu_code),
+            "analysis_selected_score": "",
+            "analysis_best_other_score": "",
+            "analysis_predicted_plu": str(predicted.get("plu_code") or ""),
+            "analysis_predicted_score": str(predicted_score or ""),
+            "analysis_embedding_count": str(store.embeddings.shape[0]),
+            "is_match": False,
+            "confidence": round(confidence, 2),
+            "top_matches": top_matches,
+        }
+
+    analysis_detail = {
+        "selected_plu": str(plu_product.plu_code),
+        "selected_score": result.get("selected_score"),
+        "best_other_score": result.get("best_other_score"),
+        "predicted_plu": result.get("predicted_plu"),
+        "predicted_score": result.get("predicted_score"),
+        "embedding_count": result.get("embedding_count"),
+    }
+    analysis = (
+        "ResNet embedding cosine check: "
+        f"selected_plu={analysis_detail['selected_plu']}, "
+        f"selected_score={analysis_detail['selected_score']:.3f}, "
+        f"best_other={analysis_detail['best_other_score']:.3f}, "
+        f"predicted_plu={analysis_detail['predicted_plu']}, "
+        f"predicted_score={analysis_detail['predicted_score']:.3f}."
+    )
+    return {
+        "analysis": analysis,
+        "analysis_selected_plu": str(analysis_detail.get("selected_plu")),
+        "analysis_selected_score": f"{analysis_detail.get('selected_score'):.3f}",
+        "analysis_best_other_score": f"{analysis_detail.get('best_other_score'):.3f}",
+        "analysis_predicted_plu": str(analysis_detail.get("predicted_plu")),
+        "analysis_predicted_score": f"{analysis_detail.get('predicted_score'):.3f}",
+        "analysis_embedding_count": str(analysis_detail.get("embedding_count")),
+        "is_match": result["is_match"],
+        "confidence": result["confidence"],
+        "top_matches": top_matches,
+    }
+
+
 async def run_local_inference(image_base64: str, plu_product: PLUProduct, model_key: str = "local") -> dict:
     """Run offline ONNX model and return uniform result dict."""
     session, input_name, labels, image_size = await asyncio.to_thread(load_local_model, model_key)
@@ -1709,6 +1806,10 @@ async def analyze_image_with_ai(
                 plu_product,
                 top_k=resnet_top_k,
             )
+
+        # 0b) Frozen Butcher ResNet18 features + cosine similarity
+        if provider == 'butcher_resnet_embedding':
+            return await run_butcher_resnet_embedding_inference(image_base64, plu_product)
 
         # 1) Only local (small)
         if provider == 'local':
@@ -2052,13 +2153,19 @@ async def live_validate(payload: LiveValidateRequest):
 @api_router.post("/live/predict")
 async def live_predict(payload: LivePredictRequest):
     """Live top-3 prediction without requiring a selected PLU."""
-    supported_live_providers = {"local", "local_large", "local_embedding", "butcher_resnet"}
+    supported_live_providers = {
+        "local",
+        "local_large",
+        "local_embedding",
+        "butcher_resnet",
+        "butcher_resnet_embedding",
+    }
     if AI_PROVIDER not in supported_live_providers:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Live prediction supports only local/local_large/local_embedding/"
-                "butcher_resnet providers. Current provider: "
+                "butcher_resnet/butcher_resnet_embedding providers. Current provider: "
                 f"{AI_PROVIDER}"
             ),
         )
@@ -2965,6 +3072,7 @@ async def update_ai_config(config: AIConfigUpdate):
         "local_large",
         "local_embedding",
         "butcher_resnet",
+        "butcher_resnet_embedding",
         "local_gemini",
         "local_gemini_consensus",
     }
@@ -2972,7 +3080,7 @@ async def update_ai_config(config: AIConfigUpdate):
         raise HTTPException(status_code=400, detail=f"Provider must be one of {allowed}")
     AI_PROVIDER = config.provider
     # Normalize model choice based on provider
-    if AI_PROVIDER in {"local", "local_large", "local_embedding", "butcher_resnet"}:
+    if AI_PROVIDER in {"local", "local_large", "local_embedding", "butcher_resnet", "butcher_resnet_embedding"}:
         AI_MODEL = ""
     elif AI_PROVIDER in {"gemini", "local_gemini", "local_gemini_consensus"}:
         AI_MODEL = config.model if config.model is not None else "gemini-2.5-flash-lite"

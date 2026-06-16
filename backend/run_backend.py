@@ -26,6 +26,7 @@ def configure_runtime_environment() -> Path:
     # Default runtime paths for packaged distribution.
     _set_default_path_env("ALLOWED_IMAGE_DIR", runtime_root / "incoming")
     _set_default_path_env("BUTCHER_CONFIG_PATH", runtime_root / "butcher_config.yaml")
+    _set_default_path_env("BUTCHER_EMBEDDING_STORE_DIR", runtime_root / "butcher_embedding_store")
     _set_default_path_env("TRAY_ROI_PATH", runtime_root / "tray_roi.json")
     _set_default_path_env("PLU_BUDGETS_PATH", runtime_root / "plu_budgets.json")
     _set_default_path_env("LOCAL_MODEL_PATH", runtime_root / "models" / "local_model.onnx")

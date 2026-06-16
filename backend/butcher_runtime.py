@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 import yaml
+import numpy as np
 
 from butcher_classifier import ButcherClassifier
 
@@ -211,3 +213,25 @@ def predict_base64_image(
         "predicted_class": top1["plu_code"],
         "predicted_prob": float(top1["prob"]),
     }
+
+
+def embed_pil_image(image: Image.Image, config_path: Path) -> np.ndarray:
+    runtime = _load_runtime(config_path)
+    model = runtime["model"]
+    device = runtime["device"]
+    transform = runtime["transform"]
+
+    image = image.convert("RGB")
+    x = transform(image).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        _logits, features = model(x, return_features=True)
+        features = F.normalize(features, dim=1)
+
+    return features[0].detach().cpu().numpy().astype("float32")
+
+
+def embed_base64_image(image_base64: str, config_path: Path) -> np.ndarray:
+    image_bytes = base64.b64decode(image_base64)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return embed_pil_image(image, config_path)
