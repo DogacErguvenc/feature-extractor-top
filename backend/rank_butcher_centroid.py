@@ -124,13 +124,22 @@ def write_csv(records: list[dict], csv_path: Path) -> None:
             writer.writerow({key: rec[key] for key in fieldnames})
 
 
-def main():
-    args = parse_args()
-    config_path = Path(args.config).resolve()
-    input_dir = Path(args.input_dir).resolve()
-    out_dir = Path(args.out_dir).resolve()
-    band_count = max(1, int(args.bands))
+def run_centroid_ranking(
+    config_path: Path,
+    input_dir: Path,
+    out_dir: Path,
+    recursive: bool = False,
+    copy_mode: str = "bands",
+    bands: int = 5,
+    progress_callback=None,
+) -> dict:
+    config_path = Path(config_path).resolve()
+    input_dir = Path(input_dir).resolve()
+    out_dir = Path(out_dir).resolve()
+    band_count = max(1, int(bands))
 
+    if copy_mode not in {"bands", "ranked", "none"}:
+        raise ValueError("copy_mode must be one of: bands, ranked, none")
     if not input_dir.exists():
         raise FileNotFoundError(f"Input dir not found: {input_dir}")
 
@@ -140,7 +149,7 @@ def main():
     if not runtime_cfg.class_map_path.exists():
         raise FileNotFoundError(f"Butcher class map not found: {runtime_cfg.class_map_path}")
 
-    image_paths = list(iter_images(input_dir, args.recursive))
+    image_paths = list(iter_images(input_dir, recursive))
     if not image_paths:
         raise RuntimeError(f"No images found in {input_dir}")
 
@@ -155,11 +164,15 @@ def main():
                 vec = embed_pil_image(img, config_path)
             embeddings.append(normalize(vec))
             valid_paths.append(image_path)
+            if progress_callback is not None:
+                progress_callback(idx, len(image_paths))
             if idx % 50 == 0:
                 print(f"Processed {idx}/{len(image_paths)} images...")
         except Exception as exc:
             skipped.append({"path": str(image_path), "error": str(exc)})
             print(f"Skip {image_path}: {exc}")
+            if progress_callback is not None:
+                progress_callback(idx, len(image_paths))
 
     if not embeddings:
         raise RuntimeError("No embeddings created; check input images.")
@@ -187,7 +200,7 @@ def main():
         )
 
     write_csv(records, out_dir / "centroid_ranking.csv")
-    copy_ranked_images(records, out_dir, args.copy_mode, band_count)
+    copy_ranked_images(records, out_dir, copy_mode, band_count)
 
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -197,7 +210,7 @@ def main():
         "image_count": len(image_paths),
         "processed_count": len(records),
         "skipped_count": len(skipped),
-        "copy_mode": args.copy_mode,
+        "copy_mode": copy_mode,
         "bands": band_count,
         "similarity_min": round(float(similarities.min()), 6),
         "similarity_max": round(float(similarities.max()), 6),
@@ -211,8 +224,24 @@ def main():
 
     print(f"Saved ranking CSV: {out_dir / 'centroid_ranking.csv'}")
     print(f"Saved summary: {out_dir / 'summary.json'}")
-    if args.copy_mode != "none":
+    if copy_mode != "none":
         print(f"Copied review images under: {out_dir}")
+    summary["output_dir"] = str(out_dir)
+    summary["ranking_csv"] = str(out_dir / "centroid_ranking.csv")
+    summary["summary_path"] = str(out_dir / "summary.json")
+    return summary
+
+
+def main():
+    args = parse_args()
+    run_centroid_ranking(
+        config_path=Path(args.config),
+        input_dir=Path(args.input_dir),
+        out_dir=Path(args.out_dir),
+        recursive=args.recursive,
+        copy_mode=args.copy_mode,
+        bands=args.bands,
+    )
 
 
 if __name__ == "__main__":

@@ -386,6 +386,7 @@ EMBEDDING_ENGINE = None
 EMBEDDING_STORE = None
 EMBEDDING_STORE_LOCK = asyncio.Lock()
 BOOTSTRAP_POOL_LOCK = asyncio.Lock()
+CENTROID_RANK_JOBS: dict[str, dict] = {}
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -518,6 +519,13 @@ class LivePredictRequest(BaseModel):
 class BatchValidationMeta(BaseModel):
     filename: str
     plu_code: str
+
+class CentroidRankRequest(BaseModel):
+    input_dir: str
+    out_dir: Optional[str] = None
+    recursive: bool = False
+    copy_mode: str = "bands"
+    bands: int = 5
 
 class AIConfigUpdate(BaseModel):
     provider: str
@@ -2705,6 +2713,121 @@ async def batch_validate(
         "results": results,
         "foldering": foldering_info,
     }
+
+
+def _update_centroid_rank_job(job_id: str, **fields) -> None:
+    job = CENTROID_RANK_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(fields)
+    job["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
+    _update_centroid_rank_job(
+        job_id,
+        status="running",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        error="",
+    )
+    try:
+        from rank_butcher_centroid import run_centroid_ranking
+
+        input_dir = Path(payload["input_dir"]).expanduser().resolve()
+        out_dir_raw = str(payload.get("out_dir") or "").strip()
+        out_dir = (
+            Path(out_dir_raw).expanduser().resolve()
+            if out_dir_raw
+            else (ROOT_DIR / "centroid_rank_jobs" / job_id).resolve()
+        )
+
+        def _progress(processed: int, total: int) -> None:
+            _update_centroid_rank_job(
+                job_id,
+                processed_count=int(processed),
+                total_count=int(total),
+            )
+
+        summary = run_centroid_ranking(
+            config_path=BUTCHER_CONFIG_PATH,
+            input_dir=input_dir,
+            out_dir=out_dir,
+            recursive=bool(payload.get("recursive")),
+            copy_mode=str(payload.get("copy_mode") or "bands"),
+            bands=int(payload.get("bands") or 5),
+            progress_callback=_progress,
+        )
+        _update_centroid_rank_job(
+            job_id,
+            status="complete",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            processed_count=int(summary.get("processed_count", 0)),
+            total_count=int(summary.get("image_count", 0)),
+            result=summary,
+            output_dir=summary.get("output_dir"),
+            ranking_csv=summary.get("ranking_csv"),
+            summary_path=summary.get("summary_path"),
+        )
+    except Exception as exc:
+        logging.exception(f"Centroid rank job failed: {job_id}")
+        _update_centroid_rank_job(
+            job_id,
+            status="error",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            error=str(exc),
+        )
+
+
+@api_router.post("/dataset/centroid-rank")
+async def start_centroid_rank(payload: CentroidRankRequest):
+    input_raw = str(payload.input_dir or "").strip()
+    if not input_raw:
+        raise HTTPException(status_code=400, detail="input_dir is required")
+
+    copy_mode = str(payload.copy_mode or "bands").strip()
+    if copy_mode not in {"bands", "ranked", "none"}:
+        raise HTTPException(status_code=400, detail="copy_mode must be one of: bands, ranked, none")
+
+    bands = max(1, min(int(payload.bands or 5), 20))
+    input_dir = Path(input_raw).expanduser().resolve()
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Input dir not found: {input_dir}")
+
+    out_dir = str(payload.out_dir or "").strip()
+    job_id = str(uuid.uuid4())
+    request_payload = {
+        "input_dir": str(input_dir),
+        "out_dir": out_dir,
+        "recursive": bool(payload.recursive),
+        "copy_mode": copy_mode,
+        "bands": bands,
+    }
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "input_dir": str(input_dir),
+        "out_dir": out_dir,
+        "recursive": bool(payload.recursive),
+        "copy_mode": copy_mode,
+        "bands": bands,
+        "processed_count": 0,
+        "total_count": 0,
+        "error": "",
+        "result": None,
+    }
+    CENTROID_RANK_JOBS[job_id] = job
+    asyncio.create_task(asyncio.to_thread(_run_centroid_rank_job, job_id, request_payload))
+    return job
+
+
+@api_router.get("/dataset/centroid-rank/{job_id}")
+async def get_centroid_rank_job(job_id: str):
+    job = CENTROID_RANK_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Centroid rank job not found")
+    return job
 
 # Get validation results
 @api_router.get("/validation/results")

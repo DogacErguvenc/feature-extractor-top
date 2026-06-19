@@ -49,6 +49,13 @@ const statusCopy = {
   error: "Hata"
 };
 
+const centroidStatusCopy = {
+  queued: "Sırada",
+  running: "Çalışıyor",
+  complete: "Tamamlandı",
+  error: "Hata"
+};
+
 const BatchProcessing = () => {
   const [pluList, setPluList] = useState([]);
   const [files, setFiles] = useState([]);
@@ -57,10 +64,28 @@ const BatchProcessing = () => {
   const [summary, setSummary] = useState(null);
   const [folderingEnabled, setFolderingEnabled] = useState(false);
   const [folderingInfo, setFolderingInfo] = useState(null);
+  const [centroidInputDir, setCentroidInputDir] = useState("");
+  const [centroidOutDir, setCentroidOutDir] = useState("");
+  const [centroidRecursive, setCentroidRecursive] = useState(false);
+  const [centroidCopyMode, setCentroidCopyMode] = useState("bands");
+  const [centroidBands, setCentroidBands] = useState(5);
+  const [centroidJob, setCentroidJob] = useState(null);
+  const [centroidStarting, setCentroidStarting] = useState(false);
+  const centroidBusy = centroidStarting || ["queued", "running"].includes(centroidJob?.status);
 
   useEffect(() => {
     fetchPluList();
   }, []);
+
+  useEffect(() => {
+    if (!centroidJob?.job_id || !["queued", "running"].includes(centroidJob.status)) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      fetchCentroidJob(centroidJob.job_id);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [centroidJob?.job_id, centroidJob?.status]);
 
   const fetchPluList = async () => {
     try {
@@ -69,6 +94,47 @@ const BatchProcessing = () => {
     } catch (error) {
       console.error("Error fetching PLU list", error);
       toast.error("PLU listesi alınamadı");
+    }
+  };
+
+  const fetchCentroidJob = async (jobId) => {
+    try {
+      const res = await axios.get(`${API}/dataset/centroid-rank/${jobId}`);
+      setCentroidJob(res.data);
+      if (res.data?.status === "complete") {
+        toast.success("Centroid temizleme tamamlandı");
+      } else if (res.data?.status === "error") {
+        toast.error(`Centroid temizleme hatası: ${res.data?.error || "Bilinmeyen hata"}`);
+      }
+    } catch (error) {
+      console.error("Error fetching centroid job", error);
+      toast.error("Centroid iş durumu alınamadı");
+    }
+  };
+
+  const startCentroidRanking = async () => {
+    if (!centroidInputDir.trim()) {
+      toast.error("Karışık fotoğraf klasör yolunu girin");
+      return;
+    }
+
+    setCentroidStarting(true);
+    setCentroidJob(null);
+    try {
+      const res = await axios.post(`${API}/dataset/centroid-rank`, {
+        input_dir: centroidInputDir.trim(),
+        out_dir: centroidOutDir.trim() || null,
+        recursive: centroidRecursive,
+        copy_mode: centroidCopyMode,
+        bands: Number(centroidBands) || 5
+      });
+      setCentroidJob(res.data);
+      toast.success("Centroid temizleme işi başlatıldı");
+    } catch (error) {
+      console.error("Centroid ranking failed to start", error);
+      toast.error(error.response?.data?.detail || "Centroid temizleme başlatılamadı");
+    } finally {
+      setCentroidStarting(false);
     }
   };
 
@@ -236,6 +302,110 @@ const BatchProcessing = () => {
             <li>"Analizi Başlat" ile tüm fotoğraflar sırasıyla işlenir ve uyumlu/uyumsuz sonucu oluşturulur.</li>
           </ol>
         </CardContent>
+      </Card>
+
+      <Card className="centroid-card">
+        <CardHeader>
+          <CardTitle>Centroid Temizleme</CardTitle>
+          <CardDescription>
+            Backend'in erişebildiği bir klasördeki karışık fotoğrafları ResNet centroid'ine yakınlığa göre sıralar.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="centroid-grid">
+          <div className="centroid-field">
+            <Label htmlFor="centroid-input-dir">Karışık fotoğraf klasörü</Label>
+            <input
+              id="centroid-input-dir"
+              type="text"
+              value={centroidInputDir}
+              onChange={(e) => setCentroidInputDir(e.target.value)}
+              placeholder={"Örn: D:\\En son fotolar_jpg"}
+              disabled={centroidBusy}
+            />
+          </div>
+          <div className="centroid-field">
+            <Label htmlFor="centroid-out-dir">Çıktı klasörü</Label>
+            <input
+              id="centroid-out-dir"
+              type="text"
+              value={centroidOutDir}
+              onChange={(e) => setCentroidOutDir(e.target.value)}
+              placeholder={"Boşsa backend\\centroid_rank_jobs altında oluşturulur"}
+              disabled={centroidBusy}
+            />
+          </div>
+          <div className="centroid-options">
+            <label className="foldering-toggle" htmlFor="centroid-recursive">
+              <input
+                id="centroid-recursive"
+                type="checkbox"
+                checked={centroidRecursive}
+                onChange={(e) => setCentroidRecursive(e.target.checked)}
+                disabled={centroidBusy}
+              />
+              <span>Alt klasörleri de tara</span>
+            </label>
+            <div className="centroid-field compact">
+              <Label htmlFor="centroid-copy-mode">Kopyalama</Label>
+              <select
+                id="centroid-copy-mode"
+                value={centroidCopyMode}
+                onChange={(e) => setCentroidCopyMode(e.target.value)}
+                disabled={centroidBusy}
+              >
+                <option value="bands">Band klasörleri</option>
+                <option value="ranked">Tek sıralı klasör</option>
+                <option value="none">Sadece CSV</option>
+              </select>
+            </div>
+            <div className="centroid-field compact">
+              <Label htmlFor="centroid-bands">Band sayısı</Label>
+              <input
+                id="centroid-bands"
+                type="number"
+                min="1"
+                max="20"
+                value={centroidBands}
+                onChange={(e) => setCentroidBands(e.target.value)}
+                disabled={centroidBusy}
+              />
+            </div>
+          </div>
+          <div className="centroid-actions">
+            <Button
+              onClick={startCentroidRanking}
+              disabled={centroidBusy}
+            >
+              {centroidBusy ? "Çalışıyor..." : "Centroid Sıralamayı Başlat"}
+            </Button>
+          </div>
+        </CardContent>
+        {centroidJob && (
+          <CardContent className="centroid-status">
+            <p>
+              <strong>Durum:</strong> {centroidStatusCopy[centroidJob.status] || centroidJob.status}
+              {centroidJob.total_count > 0 && (
+                <> | <strong>İlerleme:</strong> {centroidJob.processed_count || 0} / {centroidJob.total_count}</>
+              )}
+            </p>
+            {centroidJob.output_dir && (
+              <p><strong>Çıktı:</strong> {centroidJob.output_dir}</p>
+            )}
+            {centroidJob.ranking_csv && (
+              <p><strong>CSV:</strong> {centroidJob.ranking_csv}</p>
+            )}
+            {centroidJob.status === "complete" && centroidJob.result && (
+              <p>
+                <strong>Özet:</strong> {centroidJob.result.processed_count} işlendi,
+                {" "}{centroidJob.result.skipped_count} atlandı,
+                {" "}similarity {centroidJob.result.similarity_min} - {centroidJob.result.similarity_max}
+              </p>
+            )}
+            {centroidJob.status === "error" && (
+              <p className="centroid-error">{centroidJob.error || "Bilinmeyen hata"}</p>
+            )}
+          </CardContent>
+        )}
       </Card>
 
       <Card className="upload-card">
