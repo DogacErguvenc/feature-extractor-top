@@ -229,9 +229,3 @@ def embed_pil_image(image: Image.Image, config_path: Path) -> np.ndarray:
         features = F.normalize(features, dim=1)
 
     return features[0].detach().cpu().numpy().astype("float32")
-
-
-def embed_base64_image(image_base64: str, config_path: Path) -> np.ndarray:
-    image_bytes = base64.b64decode(image_base64)
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    return embed_pil_image(image, config_path)

@@ -8,7 +8,6 @@ if not exist ".\incoming" mkdir ".\incoming"
 
 set "ALLOWED_IMAGE_DIR=%~dp0incoming"
 if exist "%~dp0butcher_config.yaml" set "BUTCHER_CONFIG_PATH=%~dp0butcher_config.yaml"
-if exist "%~dp0butcher_embedding_store" set "BUTCHER_EMBEDDING_STORE_DIR=%~dp0butcher_embedding_store"
 if exist "%~dp0tray_roi.json" set "TRAY_ROI_PATH=%~dp0tray_roi.json"
 if exist "%~dp0plu_budgets.json" set "PLU_BUDGETS_PATH=%~dp0plu_budgets.json"
 

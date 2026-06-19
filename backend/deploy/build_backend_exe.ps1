@@ -132,8 +132,7 @@ foreach ($file in $runtimeFiles) {
 $runtimeDirs = @(
     "models",
     "incoming",
-    "embedding_store",
-    "butcher_embedding_store"
+    "embedding_store"
 )
 
 foreach ($dir in $runtimeDirs) {

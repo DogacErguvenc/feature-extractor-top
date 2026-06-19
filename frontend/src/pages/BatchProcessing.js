@@ -32,9 +32,7 @@ const summarizeTopMatches = (matches, limit = 3) => {
     .join(" | ");
 };
 
-const topMatchesLimitFor = (result) => (
-  result?.ai_provider === "butcher_resnet" || result?.ai_provider === "butcher_resnet_embedding" ? 5 : 3
-);
+const topMatchesLimitFor = (result) => (result?.ai_provider === "butcher_resnet" ? 5 : 3);
 
 const formatSize = (size) => {
   if (!size) return "-";
