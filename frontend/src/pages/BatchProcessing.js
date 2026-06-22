@@ -59,6 +59,38 @@ const centroidStatusCopy = {
 };
 
 const activeCentroidStatuses = ["queued", "running", "cancelling"];
+const centroidStorageKeys = {
+  inputDir: "batchProcessing.centroid.inputDir",
+  outDir: "batchProcessing.centroid.outDir"
+};
+
+const readStoredValue = (key) => {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return "";
+  }
+  try {
+    return window.localStorage.getItem(key) || "";
+  } catch (error) {
+    console.warn("Stored setting could not be read", error);
+    return "";
+  }
+};
+
+const writeStoredValue = (key, value) => {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    const cleanValue = String(value || "").trim();
+    if (cleanValue) {
+      window.localStorage.setItem(key, cleanValue);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch (error) {
+    console.warn("Stored setting could not be saved", error);
+  }
+};
 
 const BatchProcessing = () => {
   const [pluList, setPluList] = useState([]);
@@ -68,8 +100,8 @@ const BatchProcessing = () => {
   const [summary, setSummary] = useState(null);
   const [folderingEnabled, setFolderingEnabled] = useState(false);
   const [folderingInfo, setFolderingInfo] = useState(null);
-  const [centroidInputDir, setCentroidInputDir] = useState("");
-  const [centroidOutDir, setCentroidOutDir] = useState("");
+  const [centroidInputDir, setCentroidInputDir] = useState(() => readStoredValue(centroidStorageKeys.inputDir));
+  const [centroidOutDir, setCentroidOutDir] = useState(() => readStoredValue(centroidStorageKeys.outDir));
   const [centroidRecursive, setCentroidRecursive] = useState(false);
   const [centroidCopyMode, setCentroidCopyMode] = useState("bands");
   const [centroidBands, setCentroidBands] = useState(5);
@@ -91,6 +123,14 @@ const BatchProcessing = () => {
   useEffect(() => {
     fetchPluList();
   }, []);
+
+  useEffect(() => {
+    writeStoredValue(centroidStorageKeys.inputDir, centroidInputDir);
+  }, [centroidInputDir]);
+
+  useEffect(() => {
+    writeStoredValue(centroidStorageKeys.outDir, centroidOutDir);
+  }, [centroidOutDir]);
 
   useEffect(() => {
     if (!centroidJob?.job_id || !activeCentroidStatuses.includes(centroidJob.status)) {
