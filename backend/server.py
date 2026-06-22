@@ -114,6 +114,93 @@ def parse_cors_origins() -> list[str]:
         return origins
     return DEFAULT_CORS
 
+
+def _dedupe_paths(paths: List[Path]) -> List[Path]:
+    seen = set()
+    result = []
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            continue
+        key = os.path.normcase(str(resolved))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return result
+
+
+def _path_is_same_or_child(path: Path, root: Path) -> bool:
+    try:
+        common = os.path.commonpath([
+            os.path.normcase(str(path)),
+            os.path.normcase(str(root)),
+        ])
+    except ValueError:
+        return False
+    return common == os.path.normcase(str(root))
+
+
+def _format_folder_entry(path: Path, is_root: bool = False) -> dict:
+    name = path.name or str(path)
+    return {
+        "name": name,
+        "path": str(path),
+        "is_root": is_root,
+    }
+
+
+def _get_centroid_browser_roots() -> List[Path]:
+    raw = os.environ.get("CENTROID_BROWSER_ROOTS", "").strip()
+    candidates: List[Path] = []
+
+    if raw:
+        parts = [part.strip().strip('"') for part in raw.replace("\n", os.pathsep).split(os.pathsep)]
+        candidates.extend(Path(part) for part in parts if part)
+    else:
+        if os.name == "nt":
+            try:
+                for partition in psutil.disk_partitions(all=False):
+                    mountpoint = (partition.mountpoint or "").strip()
+                    opts = (partition.opts or "").lower()
+                    if not mountpoint or "cdrom" in opts:
+                        continue
+                    candidates.append(Path(mountpoint))
+            except Exception as exc:
+                logging.warning(f"Failed to enumerate Windows drives for folder browser: {exc}")
+
+        candidates.extend([
+            ALLOWED_IMAGE_DIR,
+            TRAIN_DATA_DIR,
+            ROOT_DIR,
+            ROOT_DIR / "centroid_rank_jobs",
+        ])
+        try:
+            candidates.append(Path.home() / "Pictures")
+        except Exception:
+            pass
+
+    roots = [path for path in _dedupe_paths(candidates) if path.exists() and path.is_dir()]
+    return roots or [ROOT_DIR.resolve()]
+
+
+def _resolve_centroid_browser_path(raw_path: str) -> Tuple[Path, Path]:
+    if not str(raw_path or "").strip():
+        raise HTTPException(status_code=400, detail="path is required")
+
+    try:
+        path = Path(str(raw_path)).expanduser().resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {exc}")
+
+    for root in _get_centroid_browser_roots():
+        if _path_is_same_or_child(path, root):
+            return path, root
+
+    raise HTTPException(status_code=400, detail="Path is outside allowed folder roots")
+
+
 def resolve_safe_path(path_candidate: Path) -> Path:
     """Resolve a path and ensure it stays under ALLOWED_IMAGE_DIR."""
     real_path = path_candidate.resolve()
@@ -2778,6 +2865,57 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
         )
 
 
+@api_router.get("/dataset/folders")
+async def list_dataset_folders(path: Optional[str] = None):
+    roots = _get_centroid_browser_roots()
+    root_entries = [_format_folder_entry(root, is_root=True) for root in roots]
+
+    if not str(path or "").strip():
+        return {
+            "current_path": "",
+            "parent_path": None,
+            "roots": root_entries,
+            "entries": root_entries,
+        }
+
+    current_path, current_root = _resolve_centroid_browser_path(path)
+    if not current_path.exists() or not current_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {current_path}")
+
+    entries = []
+    try:
+        for child in current_path.iterdir():
+            try:
+                child_resolved = child.resolve()
+                if not child_resolved.is_dir():
+                    continue
+                if not any(_path_is_same_or_child(child_resolved, root) for root in roots):
+                    continue
+                entries.append(_format_folder_entry(child_resolved))
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Folder is not accessible: {current_path}")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Folder cannot be read: {exc}")
+
+    entries.sort(key=lambda item: item["name"].lower())
+    parent_path = None
+    try:
+        parent = current_path.parent.resolve()
+        if parent != current_path and _path_is_same_or_child(parent, current_root):
+            parent_path = str(parent)
+    except Exception:
+        parent_path = None
+
+    return {
+        "current_path": str(current_path),
+        "parent_path": parent_path,
+        "roots": root_entries,
+        "entries": entries,
+    }
+
+
 @api_router.post("/dataset/centroid-rank")
 async def start_centroid_rank(payload: CentroidRankRequest):
     input_raw = str(payload.input_dir or "").strip()
@@ -2789,11 +2927,13 @@ async def start_centroid_rank(payload: CentroidRankRequest):
         raise HTTPException(status_code=400, detail="copy_mode must be one of: bands, ranked, none")
 
     bands = max(1, min(int(payload.bands or 5), 20))
-    input_dir = Path(input_raw).expanduser().resolve()
+    input_dir, _ = _resolve_centroid_browser_path(input_raw)
     if not input_dir.exists() or not input_dir.is_dir():
         raise HTTPException(status_code=400, detail=f"Input dir not found: {input_dir}")
 
     out_dir = str(payload.out_dir or "").strip()
+    if out_dir:
+        _resolve_centroid_browser_path(out_dir)
     job_id = str(uuid.uuid4())
     request_payload = {
         "input_dir": str(input_dir),

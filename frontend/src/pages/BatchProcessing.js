@@ -71,6 +71,16 @@ const BatchProcessing = () => {
   const [centroidBands, setCentroidBands] = useState(5);
   const [centroidJob, setCentroidJob] = useState(null);
   const [centroidStarting, setCentroidStarting] = useState(false);
+  const [folderPicker, setFolderPicker] = useState({
+    open: false,
+    target: "input",
+    title: "",
+    currentPath: "",
+    parentPath: null,
+    entries: [],
+    loading: false,
+    error: ""
+  });
   const centroidBusy = centroidStarting || ["queued", "running"].includes(centroidJob?.status);
 
   useEffect(() => {
@@ -112,9 +122,64 @@ const BatchProcessing = () => {
     }
   };
 
+  const fetchFolderList = async (path = "") => {
+    setFolderPicker((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await axios.get(`${API}/dataset/folders`, {
+        params: path ? { path } : {}
+      });
+      setFolderPicker((prev) => ({
+        ...prev,
+        currentPath: res.data?.current_path || "",
+        parentPath: res.data?.parent_path || null,
+        entries: res.data?.entries || [],
+        loading: false,
+        error: ""
+      }));
+    } catch (error) {
+      console.error("Error fetching folders", error);
+      const message = error.response?.data?.detail || "Klasör listesi alınamadı";
+      setFolderPicker((prev) => ({
+        ...prev,
+        loading: false,
+        error: message
+      }));
+      toast.error(message);
+    }
+  };
+
+  const openFolderPicker = (target) => {
+    const selectedPath = target === "input" ? centroidInputDir : centroidOutDir;
+    setFolderPicker({
+      open: true,
+      target,
+      title: target === "input" ? "Karışık fotoğraf klasörü seç" : "Çıktı klasörü seç",
+      currentPath: "",
+      parentPath: null,
+      entries: [],
+      loading: true,
+      error: ""
+    });
+    fetchFolderList(selectedPath || "");
+  };
+
+  const closeFolderPicker = () => {
+    setFolderPicker((prev) => ({ ...prev, open: false }));
+  };
+
+  const selectFolder = (path) => {
+    if (!path) return;
+    if (folderPicker.target === "input") {
+      setCentroidInputDir(path);
+    } else {
+      setCentroidOutDir(path);
+    }
+    closeFolderPicker();
+  };
+
   const startCentroidRanking = async () => {
     if (!centroidInputDir.trim()) {
-      toast.error("Karışık fotoğraf klasör yolunu girin");
+      toast.error("Karışık fotoğraf klasörünü seçin");
       return;
     }
 
@@ -314,25 +379,45 @@ const BatchProcessing = () => {
         <CardContent className="centroid-grid">
           <div className="centroid-field">
             <Label htmlFor="centroid-input-dir">Karışık fotoğraf klasörü</Label>
-            <input
-              id="centroid-input-dir"
-              type="text"
-              value={centroidInputDir}
-              onChange={(e) => setCentroidInputDir(e.target.value)}
-              placeholder={"Örn: D:\\En son fotolar_jpg"}
-              disabled={centroidBusy}
-            />
+            <div className="folder-select-row" id="centroid-input-dir">
+              <div className={`folder-selected-path ${centroidInputDir ? "" : "empty"}`}>
+                {centroidInputDir || "Klasör seçilmedi"}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => openFolderPicker("input")}
+                disabled={centroidBusy}
+              >
+                Seç
+              </Button>
+            </div>
           </div>
           <div className="centroid-field">
             <Label htmlFor="centroid-out-dir">Çıktı klasörü</Label>
-            <input
-              id="centroid-out-dir"
-              type="text"
-              value={centroidOutDir}
-              onChange={(e) => setCentroidOutDir(e.target.value)}
-              placeholder={"Boşsa backend\\centroid_rank_jobs altında oluşturulur"}
-              disabled={centroidBusy}
-            />
+            <div className="folder-select-row" id="centroid-out-dir">
+              <div className={`folder-selected-path ${centroidOutDir ? "" : "empty"}`}>
+                {centroidOutDir || "Boşsa backend\\centroid_rank_jobs altında oluşturulur"}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => openFolderPicker("output")}
+                disabled={centroidBusy}
+              >
+                Seç
+              </Button>
+              {centroidOutDir && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setCentroidOutDir("")}
+                  disabled={centroidBusy}
+                >
+                  Temizle
+                </Button>
+              )}
+            </div>
           </div>
           <div className="centroid-options">
             <label className="foldering-toggle" htmlFor="centroid-recursive">
@@ -407,6 +492,90 @@ const BatchProcessing = () => {
           </CardContent>
         )}
       </Card>
+
+      {folderPicker.open && (
+        <div className="folder-picker-overlay" onClick={closeFolderPicker}>
+          <div className="folder-picker-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="folder-picker-header">
+              <div>
+                <h3>{folderPicker.title}</h3>
+                <p>Backend'in erişebildiği klasörler listelenir. Klasöre girmek için Aç, seçmek için Seç kullanın.</p>
+              </div>
+              <button type="button" className="folder-picker-close" onClick={closeFolderPicker}>
+                ×
+              </button>
+            </div>
+
+            <div className="folder-picker-toolbar">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => fetchFolderList("")}
+                disabled={folderPicker.loading}
+              >
+                Kökler
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => fetchFolderList(folderPicker.parentPath)}
+                disabled={!folderPicker.parentPath || folderPicker.loading}
+              >
+                Üst Klasör
+              </Button>
+              {folderPicker.currentPath && (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => selectFolder(folderPicker.currentPath)}
+                  disabled={folderPicker.loading}
+                >
+                  Bu Klasörü Seç
+                </Button>
+              )}
+            </div>
+
+            <div className="folder-picker-current">
+              <strong>Konum:</strong> {folderPicker.currentPath || "Kök klasörler"}
+            </div>
+
+            {folderPicker.error && (
+              <div className="folder-picker-error">{folderPicker.error}</div>
+            )}
+
+            <div className="folder-picker-list">
+              {folderPicker.loading ? (
+                <div className="folder-picker-empty">Klasörler yükleniyor...</div>
+              ) : folderPicker.entries.length === 0 ? (
+                <div className="folder-picker-empty">Alt klasör bulunamadı.</div>
+              ) : (
+                folderPicker.entries.map((entry) => (
+                  <div className="folder-picker-entry" key={entry.path}>
+                    <button
+                      type="button"
+                      className="folder-picker-entry-main"
+                      onClick={() => fetchFolderList(entry.path)}
+                    >
+                      <span className="folder-picker-entry-name">{entry.name}</span>
+                      <span className="folder-picker-entry-path">{entry.path}</span>
+                    </button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => selectFolder(entry.path)}
+                    >
+                      Seç
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <Card className="upload-card">
         <CardHeader>
