@@ -23,6 +23,7 @@ from google.genai.types import Content, Part
 from openai import AsyncOpenAI
 import psutil
 import time
+import threading
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -474,6 +475,7 @@ EMBEDDING_STORE = None
 EMBEDDING_STORE_LOCK = asyncio.Lock()
 BOOTSTRAP_POOL_LOCK = asyncio.Lock()
 CENTROID_RANK_JOBS: dict[str, dict] = {}
+CENTROID_RANK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -2811,9 +2813,10 @@ def _update_centroid_rank_job(job_id: str, **fields) -> None:
 
 
 def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
+    cancel_event = CENTROID_RANK_CANCEL_EVENTS.get(job_id)
     _update_centroid_rank_job(
         job_id,
-        status="running",
+        status="cancelling" if cancel_event and cancel_event.is_set() else "running",
         started_at=datetime.now(timezone.utc).isoformat(),
         error="",
     )
@@ -2835,6 +2838,9 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
                 total_count=int(total),
             )
 
+        def _should_stop() -> bool:
+            return bool(cancel_event and cancel_event.is_set())
+
         summary = run_centroid_ranking(
             config_path=BUTCHER_CONFIG_PATH,
             input_dir=input_dir,
@@ -2843,6 +2849,7 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
             copy_mode=str(payload.get("copy_mode") or "bands"),
             bands=int(payload.get("bands") or 5),
             progress_callback=_progress,
+            should_stop_callback=_should_stop,
         )
         _update_centroid_rank_job(
             job_id,
@@ -2856,6 +2863,15 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
             summary_path=summary.get("summary_path"),
         )
     except Exception as exc:
+        if exc.__class__.__name__ == "CentroidRankingCancelled":
+            _update_centroid_rank_job(
+                job_id,
+                status="cancelled",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                cancelled_at=datetime.now(timezone.utc).isoformat(),
+                error="",
+            )
+            return
         logging.exception(f"Centroid rank job failed: {job_id}")
         _update_centroid_rank_job(
             job_id,
@@ -2863,6 +2879,8 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
             completed_at=datetime.now(timezone.utc).isoformat(),
             error=str(exc),
         )
+    finally:
+        CENTROID_RANK_CANCEL_EVENTS.pop(job_id, None)
 
 
 @api_router.get("/dataset/folders")
@@ -2958,6 +2976,7 @@ async def start_centroid_rank(payload: CentroidRankRequest):
         "result": None,
     }
     CENTROID_RANK_JOBS[job_id] = job
+    CENTROID_RANK_CANCEL_EVENTS[job_id] = threading.Event()
     asyncio.create_task(asyncio.to_thread(_run_centroid_rank_job, job_id, request_payload))
     return job
 
@@ -2968,6 +2987,27 @@ async def get_centroid_rank_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Centroid rank job not found")
     return job
+
+
+@api_router.post("/dataset/centroid-rank/{job_id}/cancel")
+async def cancel_centroid_rank_job(job_id: str):
+    job = CENTROID_RANK_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Centroid rank job not found")
+
+    if job.get("status") not in {"queued", "running", "cancelling"}:
+        return job
+
+    cancel_event = CENTROID_RANK_CANCEL_EVENTS.get(job_id)
+    if cancel_event is not None:
+        cancel_event.set()
+
+    _update_centroid_rank_job(
+        job_id,
+        status="cancelling",
+        cancelled_requested_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return CENTROID_RANK_JOBS[job_id]
 
 # Get validation results
 @api_router.get("/validation/results")

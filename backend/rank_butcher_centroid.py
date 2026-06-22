@@ -42,6 +42,15 @@ DEFAULT_BAND_NAMES = [
 ]
 
 
+class CentroidRankingCancelled(Exception):
+    """Raised when a running centroid ranking job is cancelled cooperatively."""
+
+
+def raise_if_cancelled(should_stop_callback=None) -> None:
+    if should_stop_callback is not None and should_stop_callback():
+        raise CentroidRankingCancelled("Centroid ranking cancelled")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Rank mixed images by similarity to their ResNet centroid."
@@ -87,7 +96,13 @@ def safe_copy_name(rank: int, similarity: float, source_path: Path) -> str:
     return f"{rank:06d}_sim_{similarity:.4f}_{digest}{source_path.suffix.lower()}"
 
 
-def copy_ranked_images(records: list[dict], out_dir: Path, copy_mode: str, band_count: int) -> None:
+def copy_ranked_images(
+    records: list[dict],
+    out_dir: Path,
+    copy_mode: str,
+    band_count: int,
+    should_stop_callback=None,
+) -> None:
     if copy_mode == "none":
         return
 
@@ -95,12 +110,14 @@ def copy_ranked_images(records: list[dict], out_dir: Path, copy_mode: str, band_
         target_root = out_dir / "ranked"
         target_root.mkdir(parents=True, exist_ok=True)
         for rec in records:
+            raise_if_cancelled(should_stop_callback)
             dst = target_root / safe_copy_name(rec["rank"], rec["similarity"], Path(rec["source_path"]))
             shutil.copy2(rec["source_path"], dst)
         return
 
     target_root = out_dir / "bands"
     for rec in records:
+        raise_if_cancelled(should_stop_callback)
         band = int(rec["band_index"])
         target_dir = target_root / band_name(band, band_count)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -132,6 +149,7 @@ def run_centroid_ranking(
     copy_mode: str = "bands",
     bands: int = 5,
     progress_callback=None,
+    should_stop_callback=None,
 ) -> dict:
     config_path = Path(config_path).resolve()
     input_dir = Path(input_dir).resolve()
@@ -153,12 +171,14 @@ def run_centroid_ranking(
     if not image_paths:
         raise RuntimeError(f"No images found in {input_dir}")
 
+    raise_if_cancelled(should_stop_callback)
     out_dir.mkdir(parents=True, exist_ok=True)
     embeddings: list[np.ndarray] = []
     valid_paths: list[Path] = []
     skipped: list[dict] = []
 
     for idx, image_path in enumerate(image_paths, start=1):
+        raise_if_cancelled(should_stop_callback)
         try:
             with Image.open(image_path) as img:
                 vec = embed_pil_image(img, config_path)
@@ -174,6 +194,7 @@ def run_centroid_ranking(
             if progress_callback is not None:
                 progress_callback(idx, len(image_paths))
 
+    raise_if_cancelled(should_stop_callback)
     if not embeddings:
         raise RuntimeError("No embeddings created; check input images.")
 
@@ -199,8 +220,9 @@ def run_centroid_ranking(
             }
         )
 
+    raise_if_cancelled(should_stop_callback)
     write_csv(records, out_dir / "centroid_ranking.csv")
-    copy_ranked_images(records, out_dir, copy_mode, band_count)
+    copy_ranked_images(records, out_dir, copy_mode, band_count, should_stop_callback)
 
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),

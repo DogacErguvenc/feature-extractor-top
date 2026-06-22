@@ -52,9 +52,13 @@ const statusCopy = {
 const centroidStatusCopy = {
   queued: "Sırada",
   running: "Çalışıyor",
+  cancelling: "İptal ediliyor",
+  cancelled: "İptal edildi",
   complete: "Tamamlandı",
   error: "Hata"
 };
+
+const activeCentroidStatuses = ["queued", "running", "cancelling"];
 
 const BatchProcessing = () => {
   const [pluList, setPluList] = useState([]);
@@ -81,14 +85,15 @@ const BatchProcessing = () => {
     loading: false,
     error: ""
   });
-  const centroidBusy = centroidStarting || ["queued", "running"].includes(centroidJob?.status);
+  const centroidBusy = centroidStarting || activeCentroidStatuses.includes(centroidJob?.status);
+  const centroidCanCancel = ["queued", "running"].includes(centroidJob?.status);
 
   useEffect(() => {
     fetchPluList();
   }, []);
 
   useEffect(() => {
-    if (!centroidJob?.job_id || !["queued", "running"].includes(centroidJob.status)) {
+    if (!centroidJob?.job_id || !activeCentroidStatuses.includes(centroidJob.status)) {
       return undefined;
     }
     const timer = window.setInterval(() => {
@@ -113,6 +118,8 @@ const BatchProcessing = () => {
       setCentroidJob(res.data);
       if (res.data?.status === "complete") {
         toast.success("Centroid temizleme tamamlandı");
+      } else if (res.data?.status === "cancelled") {
+        toast.info("Centroid temizleme iptal edildi");
       } else if (res.data?.status === "error") {
         toast.error(`Centroid temizleme hatası: ${res.data?.error || "Bilinmeyen hata"}`);
       }
@@ -200,6 +207,21 @@ const BatchProcessing = () => {
       toast.error(error.response?.data?.detail || "Centroid temizleme başlatılamadı");
     } finally {
       setCentroidStarting(false);
+    }
+  };
+
+  const cancelCentroidRanking = async () => {
+    if (!centroidJob?.job_id || !centroidCanCancel) {
+      return;
+    }
+
+    try {
+      const res = await axios.post(`${API}/dataset/centroid-rank/${centroidJob.job_id}/cancel`);
+      setCentroidJob(res.data);
+      toast.info("Centroid temizleme durduruluyor");
+    } catch (error) {
+      console.error("Centroid ranking cancel failed", error);
+      toast.error(error.response?.data?.detail || "Centroid temizleme durdurulamadı");
     }
   };
 
@@ -463,6 +485,15 @@ const BatchProcessing = () => {
             >
               {centroidBusy ? "Çalışıyor..." : "Centroid Sıralamayı Başlat"}
             </Button>
+            {centroidCanCancel && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={cancelCentroidRanking}
+              >
+                Durdur
+              </Button>
+            )}
           </div>
         </CardContent>
         {centroidJob && (
