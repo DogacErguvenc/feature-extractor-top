@@ -104,7 +104,6 @@ const BatchProcessing = () => {
   const [centroidOutDir, setCentroidOutDir] = useState(() => readStoredValue(centroidStorageKeys.outDir));
   const [centroidRecursive, setCentroidRecursive] = useState(false);
   const [centroidCopyMode, setCentroidCopyMode] = useState("bands");
-  const [centroidBands, setCentroidBands] = useState(5);
   const [centroidJob, setCentroidJob] = useState(null);
   const [centroidStarting, setCentroidStarting] = useState(false);
   const [folderPicker, setFolderPicker] = useState({
@@ -238,7 +237,7 @@ const BatchProcessing = () => {
         out_dir: centroidOutDir.trim() || null,
         recursive: centroidRecursive,
         copy_mode: centroidCopyMode,
-        bands: Number(centroidBands) || 5
+        bands: 3
       });
       setCentroidJob(res.data);
       toast.success("Centroid temizleme işi başlatıldı");
@@ -505,17 +504,9 @@ const BatchProcessing = () => {
                 <option value="none">Sadece CSV</option>
               </select>
             </div>
-            <div className="centroid-field compact">
-              <Label htmlFor="centroid-bands">Band sayısı</Label>
-              <input
-                id="centroid-bands"
-                type="number"
-                min="1"
-                max="20"
-                value={centroidBands}
-                onChange={(e) => setCentroidBands(e.target.value)}
-                disabled={centroidBusy}
-              />
+            <div className="centroid-band-info">
+              <strong>Band:</strong> 3 adaptive klasör
+              <span>01_nearest, 02_review, 03_farthest</span>
             </div>
           </div>
           <div className="centroid-actions">
@@ -555,6 +546,22 @@ const BatchProcessing = () => {
                 <strong>Özet:</strong> {centroidJob.result.processed_count} işlendi,
                 {" "}{centroidJob.result.skipped_count} atlandı,
                 {" "}similarity {centroidJob.result.similarity_min} - {centroidJob.result.similarity_max}
+              </p>
+            )}
+            {centroidJob.status === "complete" && centroidJob.result?.band_thresholds && (
+              <p>
+                <strong>Adaptive sınırlar:</strong>
+                {" "}review &lt; {centroidJob.result.band_thresholds.review_if_below},
+                {" "}farthest &lt; {centroidJob.result.band_thresholds.farthest_if_below}
+              </p>
+            )}
+            {centroidJob.status === "complete" && centroidJob.result?.band_counts && (
+              <p>
+                <strong>Band adetleri:</strong>
+                {" "}
+                {Object.entries(centroidJob.result.band_counts)
+                  .map(([name, count]) => `${name}: ${count}`)
+                  .join(" | ")}
               </p>
             )}
             {centroidJob.status === "error" && (

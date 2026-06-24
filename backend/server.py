@@ -614,7 +614,7 @@ class CentroidRankRequest(BaseModel):
     out_dir: Optional[str] = None
     recursive: bool = False
     copy_mode: str = "bands"
-    bands: int = 5
+    bands: int = 3
 
 class AIConfigUpdate(BaseModel):
     provider: str
@@ -2847,7 +2847,7 @@ def _run_centroid_rank_job(job_id: str, payload: dict) -> None:
             out_dir=out_dir,
             recursive=bool(payload.get("recursive")),
             copy_mode=str(payload.get("copy_mode") or "bands"),
-            bands=int(payload.get("bands") or 5),
+            bands=int(payload.get("bands") or 3),
             progress_callback=_progress,
             should_stop_callback=_should_stop,
         )
@@ -2944,7 +2944,7 @@ async def start_centroid_rank(payload: CentroidRankRequest):
     if copy_mode not in {"bands", "ranked", "none"}:
         raise HTTPException(status_code=400, detail="copy_mode must be one of: bands, ranked, none")
 
-    bands = max(1, min(int(payload.bands or 5), 20))
+    bands = 3
     input_dir, _ = _resolve_centroid_browser_path(input_raw)
     if not input_dir.exists() or not input_dir.is_dir():
         raise HTTPException(status_code=400, detail=f"Input dir not found: {input_dir}")

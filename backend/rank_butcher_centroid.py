@@ -11,7 +11,8 @@ Output:
   centroid_ranking.csv
   summary.json
   bands\01_nearest\...
-  bands\05_farthest\...
+  bands\02_review\...
+  bands\03_farthest\...
 """
 
 from __future__ import annotations
@@ -33,12 +34,11 @@ from butcher_runtime import embed_pil_image, load_runtime_config
 DEFAULT_CONFIG_PATH = (Path(__file__).parent / "butcher_config.yaml").resolve()
 DEFAULT_OUT_DIR = (Path(__file__).parent / "centroid_ranked").resolve()
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+DEFAULT_BAND_COUNT = 3
 DEFAULT_BAND_NAMES = [
     "01_nearest",
-    "02_near",
-    "03_middle",
-    "04_far",
-    "05_farthest",
+    "02_review",
+    "03_farthest",
 ]
 
 
@@ -69,7 +69,12 @@ def parse_args():
         default="bands",
         help="Copy reviewed images into band folders, one ranked folder, or do not copy images.",
     )
-    parser.add_argument("--bands", type=int, default=5, help="Number of similarity bands.")
+    parser.add_argument(
+        "--bands",
+        type=int,
+        default=DEFAULT_BAND_COUNT,
+        help="Number of adaptive similarity bands. Current workflow uses 3.",
+    )
     return parser.parse_args()
 
 
@@ -86,9 +91,48 @@ def normalize(vec: np.ndarray) -> np.ndarray:
 
 
 def band_name(index: int, band_count: int) -> str:
-    if band_count == 5:
+    if band_count == DEFAULT_BAND_COUNT:
         return DEFAULT_BAND_NAMES[index]
     return f"{index + 1:02d}_band"
+
+
+def compute_adaptive_band_plan(similarities: np.ndarray) -> dict:
+    sims = np.asarray(similarities, dtype="float32")
+    median = float(np.median(sims))
+    mean = float(np.mean(sims))
+    std = float(np.std(sims))
+    sim_min = float(np.min(sims))
+    sim_max = float(np.max(sims))
+    mad = float(np.median(np.abs(sims - median)))
+    robust_sigma = float(1.4826 * mad)
+
+    # These floors prevent tiny natural variation from creating artificial outliers.
+    review_margin = max(1.5 * robust_sigma, 0.015)
+    farthest_margin = max(3.0 * robust_sigma, 0.040)
+    review_threshold = median - review_margin
+    farthest_threshold = min(median - farthest_margin, review_threshold - 1e-6)
+
+    return {
+        "mode": "adaptive_similarity",
+        "band_count": DEFAULT_BAND_COUNT,
+        "median": round(median, 6),
+        "mean": round(mean, 6),
+        "std": round(std, 6),
+        "mad": round(mad, 6),
+        "robust_sigma": round(robust_sigma, 6),
+        "similarity_min": round(sim_min, 6),
+        "similarity_max": round(sim_max, 6),
+        "review_if_below": round(float(review_threshold), 6),
+        "farthest_if_below": round(float(farthest_threshold), 6),
+    }
+
+
+def adaptive_band_index(similarity: float, band_plan: dict) -> int:
+    if similarity < float(band_plan["farthest_if_below"]):
+        return 2
+    if similarity < float(band_plan["review_if_below"]):
+        return 1
+    return 0
 
 
 def safe_copy_name(rank: int, similarity: float, source_path: Path) -> str:
@@ -116,6 +160,9 @@ def copy_ranked_images(
         return
 
     target_root = out_dir / "bands"
+    for index in range(band_count):
+        (target_root / band_name(index, band_count)).mkdir(parents=True, exist_ok=True)
+
     for rec in records:
         raise_if_cancelled(should_stop_callback)
         band = int(rec["band_index"])
@@ -147,14 +194,16 @@ def run_centroid_ranking(
     out_dir: Path,
     recursive: bool = False,
     copy_mode: str = "bands",
-    bands: int = 5,
+    bands: int = DEFAULT_BAND_COUNT,
     progress_callback=None,
     should_stop_callback=None,
 ) -> dict:
     config_path = Path(config_path).resolve()
     input_dir = Path(input_dir).resolve()
     out_dir = Path(out_dir).resolve()
-    band_count = max(1, int(bands))
+    if int(bands) != DEFAULT_BAND_COUNT:
+        raise ValueError("Adaptive centroid ranking currently supports exactly 3 bands.")
+    band_count = DEFAULT_BAND_COUNT
 
     if copy_mode not in {"bands", "ranked", "none"}:
         raise ValueError("copy_mode must be one of: bands, ranked, none")
@@ -201,20 +250,23 @@ def run_centroid_ranking(
     matrix = np.stack(embeddings, axis=0).astype("float32")
     centroid = normalize(matrix.mean(axis=0))
     similarities = matrix @ centroid
+    band_plan = compute_adaptive_band_plan(similarities)
 
     order = np.argsort(-similarities)
     records: list[dict] = []
-    total = int(order.size)
+    band_counts = {band_name(index, band_count): 0 for index in range(band_count)}
     for sorted_pos, old_idx in enumerate(order.tolist(), start=1):
         sim = float(similarities[old_idx])
-        band_index = min(band_count - 1, int((sorted_pos - 1) * band_count / total))
+        band_index = adaptive_band_index(sim, band_plan)
+        band_label = band_name(band_index, band_count)
+        band_counts[band_label] += 1
         records.append(
             {
                 "rank": sorted_pos,
                 "similarity": round(sim, 6),
                 "distance": round(1.0 - sim, 6),
                 "band_index": band_index,
-                "band": band_name(band_index, band_count),
+                "band": band_label,
                 "filename": valid_paths[old_idx].name,
                 "source_path": str(valid_paths[old_idx]),
             }
@@ -234,6 +286,9 @@ def run_centroid_ranking(
         "skipped_count": len(skipped),
         "copy_mode": copy_mode,
         "bands": band_count,
+        "band_mode": band_plan["mode"],
+        "band_thresholds": band_plan,
+        "band_counts": band_counts,
         "similarity_min": round(float(similarities.min()), 6),
         "similarity_max": round(float(similarities.max()), 6),
         "similarity_mean": round(float(similarities.mean()), 6),
