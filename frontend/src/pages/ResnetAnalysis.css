@@ -15,6 +15,24 @@
 .resnet-header-actions {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.resnet-rebuild-notice {
+  padding: 10px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1e40af;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.resnet-rebuild-notice.error {
+  border-color: #fecaca;
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 .resnet-summary-grid {

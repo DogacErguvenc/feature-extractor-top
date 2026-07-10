@@ -500,6 +500,14 @@ BOOTSTRAP_POOL_LOCK = asyncio.Lock()
 CENTROID_RANK_JOBS: dict[str, dict] = {}
 CENTROID_RANK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 RESNET_ANALYSIS_OVERVIEW_CACHE: dict[str, dict] = {}
+RESNET_ANALYSIS_REBUILD_JOB: dict = {
+    "status": "idle",
+    "processed": 0,
+    "total": 0,
+    "error": "",
+    "started_at": None,
+    "completed_at": None,
+}
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -780,6 +788,10 @@ async def ensure_database_indexes() -> None:
         await db.validation_results.create_index([("ai_provider", 1), ("timestamp", -1)], background=True)
         await db.validation_results.create_index([("ai_provider", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
         await db.validation_results.create_index([("ai_provider", 1), ("plu_code", 1), ("top_matches.plu_code", 1), ("timestamp", -1)], background=True)
+        await db.resnet_analysis_records.create_index([("ai_provider", 1), ("timestamp", -1)], background=True)
+        await db.resnet_analysis_records.create_index([("ai_provider", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
+        await db.resnet_analysis_records.create_index([("ai_provider", 1), ("plu_code", 1), ("is_top5_match", 1), ("selected_score_pct", 1), ("timestamp", -1)], background=True)
+        await db.resnet_analysis_records.create_index([("validation_id", 1)], unique=True, background=True)
         await db.captured_images.create_index([("timestamp", -1)], background=True)
         await db.captured_images.create_index([("plu_code", 1), ("timestamp", -1)], background=True)
     except Exception as e:
@@ -1023,6 +1035,117 @@ def _extract_resnet_metrics_for_plu(doc: dict, selected_plu: str, low_conf_thres
         "is_top1_match": is_top1_match,
         "is_low_conf_top5": is_low_conf_top5,
     }
+
+
+def _build_resnet_analysis_record(doc: dict) -> Optional[dict]:
+    if str(doc.get("ai_provider") or "") != "butcher_resnet":
+        return None
+
+    selected_plu = str(doc.get("plu_code") or "").strip()
+    validation_id = str(doc.get("id") or "").strip()
+    if not selected_plu or not validation_id:
+        return None
+
+    top_matches = _ensure_top_matches(doc.get("top_matches"), top_k=5)
+    top5_codes: List[str] = []
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code:
+            top5_codes.append(code)
+
+    top1_code = top5_codes[0] if top5_codes else ""
+    top1_score_pct = _to_score_pct(top_matches[0]) if top_matches else None
+    selected_score_pct: Optional[float] = None
+    for item in top_matches:
+        code = str(item.get("plu_code") or "").strip()
+        if code == selected_plu:
+            selected_score_pct = _to_score_pct(item)
+            break
+
+    filename = str(doc.get("original_filename") or doc.get("filename") or "").strip()
+    predicted_plu = str(doc.get("analysis_predicted_plu") or top1_code).strip()
+
+    return {
+        "validation_id": validation_id,
+        "ai_provider": "butcher_resnet",
+        "timestamp": doc.get("timestamp"),
+        "plu_code": selected_plu,
+        "filename": filename,
+        "predicted_plu": predicted_plu,
+        "top5_codes": top5_codes,
+        "top1_score_pct": round(top1_score_pct, 2) if top1_score_pct is not None else None,
+        "selected_score_pct": round(selected_score_pct, 2) if selected_score_pct is not None else None,
+        "is_top5_match": selected_plu in top5_codes,
+        "is_top1_match": bool(top1_code and top1_code == selected_plu),
+    }
+
+
+async def _upsert_resnet_analysis_record(doc: dict) -> None:
+    record = _build_resnet_analysis_record(doc)
+    if not record:
+        return
+    await db.resnet_analysis_records.update_one(
+        {"validation_id": record["validation_id"]},
+        {"$set": record},
+        upsert=True,
+    )
+    RESNET_ANALYSIS_OVERVIEW_CACHE.clear()
+
+
+async def _insert_validation_result(doc: dict) -> None:
+    await db.validation_results.insert_one(doc)
+    await _upsert_resnet_analysis_record(doc)
+
+
+def _set_resnet_rebuild_job(**fields) -> None:
+    RESNET_ANALYSIS_REBUILD_JOB.update(fields)
+    RESNET_ANALYSIS_REBUILD_JOB["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def _rebuild_resnet_analysis_records() -> None:
+    _set_resnet_rebuild_job(
+        status="running",
+        processed=0,
+        total=0,
+        error="",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=None,
+    )
+    try:
+        query = {"ai_provider": "butcher_resnet"}
+        projection = {
+            "_id": 0,
+            "id": 1,
+            "timestamp": 1,
+            "plu_code": 1,
+            "analysis_predicted_plu": 1,
+            "original_filename": 1,
+            "filename": 1,
+            "top_matches": 1,
+            "ai_provider": 1,
+        }
+        total = await db.validation_results.count_documents(query)
+        _set_resnet_rebuild_job(total=int(total))
+        cursor = db.validation_results.find(query, projection).sort("timestamp", -1)
+        processed = 0
+        async for doc in cursor:
+            await _upsert_resnet_analysis_record(doc)
+            processed += 1
+            if processed % 100 == 0:
+                _set_resnet_rebuild_job(processed=processed)
+        _set_resnet_rebuild_job(
+            status="complete",
+            processed=processed,
+            total=int(total),
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        logging.exception("ResNet analysis rebuild failed")
+        _set_resnet_rebuild_job(
+            status="error",
+            error=str(exc),
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
 
 
 def _sanitize_filename(name: str) -> str:
@@ -2030,7 +2153,7 @@ async def select_plu(selection: PLUSelection, background_tasks: BackgroundTasks)
             )
             doc = validation.model_dump()
             doc['timestamp'] = doc['timestamp'].isoformat()
-            await db.validation_results.insert_one(doc)
+            await _insert_validation_result(doc)
             if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
                 _schedule_bootstrap_update(
                     selection.plu_code,
@@ -2131,7 +2254,7 @@ async def live_validate(payload: LiveValidateRequest):
         )
         validation_doc = validation.model_dump()
         validation_doc["timestamp"] = validation_doc["timestamp"].isoformat()
-        await db.validation_results.insert_one(validation_doc)
+        await _insert_validation_result(validation_doc)
         validation_id = validation.id
 
         if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
@@ -2501,7 +2624,7 @@ async def validate_sync(payload: ValidateSyncRequest):
         )
         doc = validation.model_dump()
         doc["timestamp"] = doc["timestamp"].isoformat()
-        await db.validation_results.insert_one(doc)
+        await _insert_validation_result(doc)
 
         response_payload = _stringify_response({
             "is_match": False,
@@ -2575,7 +2698,7 @@ async def validate_sync(payload: ValidateSyncRequest):
     )
     doc = validation.model_dump()
     doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.validation_results.insert_one(doc)
+    await _insert_validation_result(doc)
 
     if BOOTSTRAP_ENABLE and result.get("embedding_vector") is not None:
         _schedule_bootstrap_update(
@@ -2742,7 +2865,7 @@ async def batch_validate(
         doc = validation.model_dump()
         doc['timestamp'] = doc['timestamp'].isoformat()
         try:
-            await db.validation_results.insert_one(doc)
+            await _insert_validation_result(doc)
         except PyMongoError as exc:
             raise mongo_unavailable_exception(exc) from exc
 
@@ -3409,6 +3532,28 @@ async def get_validation_kpi(top_pairs: int = 10):
     }
 
 
+@api_router.get("/stats/resnet-top5-analysis/rebuild")
+async def get_resnet_top5_rebuild_status():
+    return RESNET_ANALYSIS_REBUILD_JOB
+
+
+@api_router.post("/stats/resnet-top5-analysis/rebuild")
+async def start_resnet_top5_rebuild():
+    if RESNET_ANALYSIS_REBUILD_JOB.get("status") in {"queued", "running"}:
+        return RESNET_ANALYSIS_REBUILD_JOB
+    RESNET_ANALYSIS_OVERVIEW_CACHE.clear()
+    _set_resnet_rebuild_job(
+        status="queued",
+        processed=0,
+        total=0,
+        error="",
+        started_at=None,
+        completed_at=None,
+    )
+    asyncio.create_task(_rebuild_resnet_analysis_records())
+    return RESNET_ANALYSIS_REBUILD_JOB
+
+
 @api_router.get("/stats/resnet-top5-analysis")
 async def get_resnet_top5_analysis(
     plu_code: Optional[str] = None,
@@ -3555,18 +3700,27 @@ async def get_resnet_top5_analysis(
     if include_overview:
         per_plu_pipeline = [
             {"$match": base_match},
-            {"$project": metric_projection},
             {"$match": {"plu_code": {"$ne": ""}}},
-            {"$addFields": metric_add_fields_1},
-            {"$addFields": metric_add_fields_2},
-            {"$addFields": metric_add_fields_3},
-            {"$addFields": metric_add_fields_4},
             {"$group": {
                 "_id": "$plu_code",
                 "total": {"$sum": 1},
                 "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
                 "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
-                "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
+                "low_conf_top5_count": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    "$is_top5_match",
+                                    {"$ne": ["$selected_score_pct", None]},
+                                    {"$lt": ["$selected_score_pct", threshold]},
+                                ]
+                            },
+                            1,
+                            0,
+                        ]
+                    }
+                },
                 "avg_top1_score_pct": {"$avg": "$top1_score_pct"},
                 "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
                 "top1_score_sum": {"$sum": {"$ifNull": ["$top1_score_pct", 0]}},
@@ -3575,7 +3729,7 @@ async def get_resnet_top5_analysis(
             }},
             {"$sort": {"total": -1}},
         ]
-        per_plu_docs = await db.validation_results.aggregate(per_plu_pipeline, allowDiskUse=True).to_list(10000)
+        per_plu_docs = await db.resnet_analysis_records.aggregate(per_plu_pipeline, allowDiskUse=True).to_list(10000)
 
         total = 0
         top5_match_total = 0
@@ -3649,22 +3803,31 @@ async def get_resnet_top5_analysis(
         }
         selected_stats_pipeline = [
             {"$match": selected_match},
-            {"$project": metric_projection},
             {"$match": {"plu_code": {"$ne": ""}}},
-            {"$addFields": metric_add_fields_1},
-            {"$addFields": metric_add_fields_2},
-            {"$addFields": metric_add_fields_3},
-            {"$addFields": metric_add_fields_4},
             {"$group": {
                 "_id": "$plu_code",
                 "total": {"$sum": 1},
                 "top5_match_count": {"$sum": {"$cond": ["$is_top5_match", 1, 0]}},
                 "top1_match_count": {"$sum": {"$cond": ["$is_top1_match", 1, 0]}},
-                "low_conf_top5_count": {"$sum": {"$cond": ["$is_low_conf_top5", 1, 0]}},
+                "low_conf_top5_count": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    "$is_top5_match",
+                                    {"$ne": ["$selected_score_pct", None]},
+                                    {"$lt": ["$selected_score_pct", threshold]},
+                                ]
+                            },
+                            1,
+                            0,
+                        ]
+                    }
+                },
                 "avg_selected_score_pct": {"$avg": "$selected_score_pct"},
             }},
         ]
-        selected_docs = await db.validation_results.aggregate(selected_stats_pipeline).to_list(1)
+        selected_docs = await db.resnet_analysis_records.aggregate(selected_stats_pipeline).to_list(1)
         if selected_docs:
             s = selected_docs[0]
             s_total = int(s.get("total") or 0)
@@ -3688,29 +3851,33 @@ async def get_resnet_top5_analysis(
 
         sample_output_projection = {
             "_id": 0,
-            "validation_id": "$id",
+            "validation_id": 1,
             "timestamp": 1,
             "plu_code": 1,
-            "filename": {"$ifNull": ["$original_filename", "$filename"]},
-            "predicted_plu": {"$ifNull": ["$analysis_predicted_plu", "$top1_code"]},
+            "filename": 1,
+            "predicted_plu": 1,
             "top5_codes": 1,
             "top1_score_pct": {"$round": ["$top1_score_pct", 2]},
             "selected_score_pct": {"$round": ["$selected_score_pct", 2]},
             "is_top5_match": 1,
             "is_top1_match": 1,
-            "is_low_conf_top5": 1,
+            "is_low_conf_top5": {
+                "$and": [
+                    "$is_top5_match",
+                    {"$ne": ["$selected_score_pct", None]},
+                    {"$lt": ["$selected_score_pct", threshold]},
+                ]
+            },
         }
         if include_only_low_conf:
             sample_pipeline = [
-                {"$match": selected_match},
-                {"$match": {"top_matches.plu_code": selected_code}},
-                {"$project": metric_projection},
-                {"$match": {"plu_code": {"$ne": ""}}},
-                {"$addFields": metric_add_fields_1},
-                {"$addFields": metric_add_fields_2},
-                {"$addFields": metric_add_fields_3},
-                {"$addFields": metric_add_fields_4},
-                {"$match": {"is_low_conf_top5": True}},
+                {
+                    "$match": {
+                        **selected_match,
+                        "is_top5_match": True,
+                        "selected_score_pct": {"$lt": threshold},
+                    }
+                },
                 {"$sort": {"timestamp": -1}},
                 {"$limit": sample_limit},
                 {"$project": sample_output_projection},
@@ -3722,17 +3889,15 @@ async def get_resnet_top5_analysis(
                 {"$match": selected_match},
                 {"$sort": {"timestamp": -1}},
                 {"$limit": sample_limit},
-                {"$project": metric_projection},
-                {"$match": {"plu_code": {"$ne": ""}}},
-                {"$addFields": metric_add_fields_1},
-                {"$addFields": metric_add_fields_2},
-                {"$addFields": metric_add_fields_3},
-                {"$addFields": metric_add_fields_4},
                 {"$project": sample_output_projection},
             ]
-        samples = await db.validation_results.aggregate(sample_pipeline).to_list(sample_limit)
+        samples = await db.resnet_analysis_records.aggregate(sample_pipeline).to_list(sample_limit)
         if selected_stats is not None:
             selected_stats["sample_count"] = len(samples)
+
+    analysis_record_count = await db.resnet_analysis_records.count_documents(base_match)
+    validation_record_count = await db.validation_results.count_documents(base_match)
+    needs_rebuild = validation_record_count > analysis_record_count
 
     return {
         "query": {
@@ -3749,7 +3914,11 @@ async def get_resnet_top5_analysis(
         "cache": {
             "overview_from_cache": overview_from_cache,
             "overview_ttl_seconds": RESNET_ANALYSIS_CACHE_TTL_SECONDS,
+            "needs_rebuild": needs_rebuild,
+            "analysis_record_count": analysis_record_count,
+            "validation_record_count": validation_record_count,
         },
+        "rebuild_job": RESNET_ANALYSIS_REBUILD_JOB,
     }
 
 

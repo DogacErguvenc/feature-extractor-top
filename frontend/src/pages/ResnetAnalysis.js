@@ -50,6 +50,8 @@ const ResnetAnalysis = () => {
   const [sampleLimit, setSampleLimit] = useState(60);
   const [onlyLowConf, setOnlyLowConf] = useState(false);
   const [renderedSampleCount, setRenderedSampleCount] = useState(SAMPLE_RENDER_CHUNK);
+  const [analysisNeedsRebuild, setAnalysisNeedsRebuild] = useState(false);
+  const [rebuildStatus, setRebuildStatus] = useState(null);
 
   const fetchOverview = async (thresholdValue = threshold, refreshOverview = false) => {
     setLoadingOverview(true);
@@ -63,6 +65,8 @@ const ResnetAnalysis = () => {
       });
       const payload = res.data || {};
       setOverview(payload.summary || null);
+      setAnalysisNeedsRebuild(Boolean(payload.cache?.needs_rebuild));
+      setRebuildStatus(payload.rebuild_job || null);
       const rows = payload.per_plu || [];
       setPerPlu(rows);
       if (!selectedPlu && rows.length > 0) {
@@ -98,6 +102,8 @@ const ResnetAnalysis = () => {
       });
       const payload = res.data || {};
       const nextSamples = payload.samples || [];
+      setAnalysisNeedsRebuild(Boolean(payload.cache?.needs_rebuild));
+      setRebuildStatus(payload.rebuild_job || null);
       if (payload.summary) {
         setOverview(payload.summary);
       }
@@ -112,6 +118,23 @@ const ResnetAnalysis = () => {
     }
   };
 
+  const fetchRebuildStatus = async () => {
+    const res = await axios.get(`${API}/stats/resnet-top5-analysis/rebuild`);
+    setRebuildStatus(res.data || null);
+    return res.data || null;
+  };
+
+  const startAnalysisRebuild = async () => {
+    try {
+      const res = await axios.post(`${API}/stats/resnet-top5-analysis/rebuild`);
+      setRebuildStatus(res.data || null);
+      toast.info("Hızlı analiz indeksi arka planda oluşturuluyor");
+    } catch (error) {
+      console.error("resnet rebuild start error", error);
+      toast.error("Analiz indeksi başlatılamadı");
+    }
+  };
+
   useEffect(() => {
     fetchOverview();
   }, []);
@@ -121,6 +144,32 @@ const ResnetAnalysis = () => {
       fetchSelectedPlu(selectedPlu);
     }
   }, [selectedPlu]);
+
+  useEffect(() => {
+    const status = rebuildStatus?.status;
+    if (!["queued", "running"].includes(status)) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const nextStatus = await fetchRebuildStatus();
+        if (nextStatus?.status === "complete") {
+          toast.success("Hızlı analiz indeksi hazır");
+          await fetchOverview(threshold, true);
+          if (selectedPlu) {
+            await fetchSelectedPlu(selectedPlu, threshold, onlyLowConf, sampleLimit);
+          }
+        } else if (nextStatus?.status === "error") {
+          toast.error(`Analiz indeksi hatası: ${nextStatus.error || "Bilinmeyen hata"}`);
+        }
+      } catch (error) {
+        console.error("resnet rebuild status error", error);
+      }
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [rebuildStatus?.status, threshold, selectedPlu, onlyLowConf, sampleLimit]);
 
   const filteredPlu = useMemo(() => {
     const query = String(pluSearch || "").trim().toLowerCase();
@@ -165,6 +214,7 @@ const ResnetAnalysis = () => {
   };
 
   const loading = loadingOverview || loadingDetails;
+  const rebuildRunning = ["queued", "running"].includes(rebuildStatus?.status);
 
   return (
     <div className="page-container resnet-analysis-page" data-testid="resnet-analysis-page">
@@ -176,11 +226,36 @@ const ResnetAnalysis = () => {
           </p>
         </div>
         <div className="resnet-header-actions">
+          {(analysisNeedsRebuild || rebuildRunning) && (
+            <Button
+              variant="outline"
+              onClick={startAnalysisRebuild}
+              disabled={rebuildRunning}
+            >
+              {rebuildRunning ? "İndeks Oluşturuluyor..." : "Hızlı İndeks Oluştur"}
+            </Button>
+          )}
           <Button variant="outline" onClick={handleRefresh} disabled={loading}>
             Yenile
           </Button>
         </div>
       </div>
+
+      {(analysisNeedsRebuild || rebuildRunning || rebuildStatus?.status === "error") && (
+        <div className={`resnet-rebuild-notice ${rebuildStatus?.status === "error" ? "error" : ""}`}>
+          {rebuildRunning ? (
+            <span>
+              Hızlı analiz indeksi hazırlanıyor: {rebuildStatus?.processed || 0} / {rebuildStatus?.total || 0}
+            </span>
+          ) : rebuildStatus?.status === "error" ? (
+            <span>Analiz indeksi oluşturulamadı: {rebuildStatus.error || "Bilinmeyen hata"}</span>
+          ) : (
+            <span>
+              Eski kayıtlar fotoğraflı ana koleksiyonda duruyor. Hızlı görüntüleme için bir kez indeks oluşturun.
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="resnet-summary-grid">
         <Card className="resnet-stat-card">
