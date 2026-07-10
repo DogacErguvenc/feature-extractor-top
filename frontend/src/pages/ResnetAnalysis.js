@@ -27,6 +27,7 @@ const normalizeTopMatches = (matches, fallbackCodes = []) => {
       .map((item, index) => ({
         rank: Number(item.rank) || index + 1,
         plu_code: String(item.plu_code),
+        plu_name: item.plu_name || item.product_name || item.name || item.plu_code,
         score_pct: item.score_pct,
       }));
 
@@ -42,6 +43,7 @@ const normalizeTopMatches = (matches, fallbackCodes = []) => {
     .map((code, index) => ({
       rank: index + 1,
       plu_code: String(code),
+      plu_name: String(code),
       score_pct: null,
     }));
 };
@@ -61,7 +63,7 @@ const getVisibleTopMatches = (matches, fallbackCodes = []) => {
 
 const formatTopMatches = (row) => {
   const visibleMatches = getVisibleTopMatches(row.top5_matches, row.top5_codes);
-  return visibleMatches.map((item) => item.plu_code).join(", ") || "-";
+  return visibleMatches.map((item) => item.plu_name || item.plu_code).join(", ") || "-";
 };
 
 const formatTimestamp = (value) => {

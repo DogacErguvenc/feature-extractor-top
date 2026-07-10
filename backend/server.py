@@ -792,6 +792,7 @@ async def ensure_database_indexes() -> None:
         await db.resnet_analysis_records.create_index([("ai_provider", 1), ("plu_code", 1), ("timestamp", -1)], background=True)
         await db.resnet_analysis_records.create_index([("ai_provider", 1), ("plu_code", 1), ("is_top5_match", 1), ("selected_score_pct", 1), ("timestamp", -1)], background=True)
         await db.resnet_analysis_records.create_index([("validation_id", 1)], unique=True, background=True)
+        await db.plu_products.create_index([("plu_code", 1)], background=True)
         await db.captured_images.create_index([("timestamp", -1)], background=True)
         await db.captured_images.create_index([("plu_code", 1), ("timestamp", -1)], background=True)
     except Exception as e:
@@ -1007,10 +1008,17 @@ def _compact_resnet_top_matches(top_matches: List[dict]) -> Tuple[List[str], Lis
             rank = index
 
         score_pct = _to_score_pct(item)
+        plu_name = str(
+            item.get("plu_name")
+            or item.get("product_name")
+            or item.get("name")
+            or code
+        ).strip()
         top5_codes.append(code)
         compact_matches.append({
             "rank": rank,
             "plu_code": code,
+            "plu_name": plu_name or code,
             "score_pct": round(score_pct, 2) if score_pct is not None else None,
         })
     return top5_codes, compact_matches
@@ -1112,6 +1120,69 @@ async def _upsert_resnet_analysis_record(doc: dict) -> None:
 async def _insert_validation_result(doc: dict) -> None:
     await db.validation_results.insert_one(doc)
     await _upsert_resnet_analysis_record(doc)
+
+
+async def _enrich_resnet_sample_names(samples: List[dict]) -> None:
+    codes: set[str] = set()
+    for sample in samples:
+        top_matches = sample.get("top5_matches")
+        if isinstance(top_matches, list):
+            for item in top_matches:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("plu_code") or "").strip()
+                if code:
+                    codes.add(code)
+
+        top5_codes = sample.get("top5_codes")
+        if isinstance(top5_codes, list):
+            for code_raw in top5_codes:
+                code = str(code_raw or "").strip()
+                if code:
+                    codes.add(code)
+
+    if not codes:
+        return
+
+    docs = await db.plu_products.find(
+        {"plu_code": {"$in": sorted(codes)}},
+        {"_id": 0, "plu_code": 1, "name": 1},
+    ).to_list(len(codes))
+    name_map = {
+        str(doc.get("plu_code") or "").strip(): str(doc.get("name") or "").strip()
+        for doc in docs
+        if str(doc.get("plu_code") or "").strip()
+    }
+
+    for sample in samples:
+        top_matches = sample.get("top5_matches")
+        if not isinstance(top_matches, list) or not top_matches:
+            fallback_codes = sample.get("top5_codes")
+            if not isinstance(fallback_codes, list):
+                fallback_codes = []
+            top_matches = [
+                {"rank": index + 1, "plu_code": str(code), "score_pct": None}
+                for index, code in enumerate(fallback_codes[:5])
+                if str(code or "").strip()
+            ]
+
+        enriched_matches: List[dict] = []
+        for index, item in enumerate(top_matches[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("plu_code") or "").strip()
+            if not code:
+                continue
+            name = (
+                name_map.get(code)
+                or str(item.get("plu_name") or item.get("product_name") or item.get("name") or "").strip()
+                or code
+            )
+            enriched_item = dict(item)
+            enriched_item["rank"] = enriched_item.get("rank") or index
+            enriched_item["plu_name"] = name
+            enriched_matches.append(enriched_item)
+        sample["top5_matches"] = enriched_matches
 
 
 def _set_resnet_rebuild_job(**fields) -> None:
@@ -3939,6 +4010,7 @@ async def get_resnet_top5_analysis(
                 {"$project": sample_output_projection},
             ]
         samples = await db.resnet_analysis_records.aggregate(sample_pipeline).to_list(sample_limit)
+        await _enrich_resnet_sample_names(samples)
         if selected_stats is not None:
             selected_stats["sample_count"] = len(samples)
 
