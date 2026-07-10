@@ -61,9 +61,18 @@ const getVisibleTopMatches = (matches, fallbackCodes = []) => {
   return highConfidenceMatches.length > 0 ? highConfidenceMatches : normalized;
 };
 
+const formatTopMatch = (item) => {
+  const label = item.plu_name || item.plu_code || "-";
+  const score = Number(item.score_pct);
+  if (!Number.isFinite(score)) {
+    return label;
+  }
+  return `${label} (${formatScore(score)})`;
+};
+
 const formatTopMatches = (row) => {
   const visibleMatches = getVisibleTopMatches(row.top5_matches, row.top5_codes);
-  return visibleMatches.map((item) => item.plu_name || item.plu_code).join(", ") || "-";
+  return visibleMatches.map(formatTopMatch).join(", ") || "-";
 };
 
 const formatTimestamp = (value) => {
