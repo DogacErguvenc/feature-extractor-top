@@ -89,6 +89,7 @@ BATCH_FOLDERING_ROOT = Path(os.environ.get('BATCH_FOLDERING_ROOT', ROOT_DIR / "b
 BATCH_FOLDERING_LOW_PCT = float(os.environ.get('BATCH_FOLDERING_LOW_PCT', '40'))
 BATCH_FOLDERING_HIGH_PCT = float(os.environ.get('BATCH_FOLDERING_HIGH_PCT', '70'))
 RESNET_ANALYSIS_MAX_SAMPLE_LIMIT = int(os.environ.get('RESNET_ANALYSIS_MAX_SAMPLE_LIMIT', '5000'))
+RESNET_ANALYSIS_CACHE_TTL_SECONDS = int(os.environ.get('RESNET_ANALYSIS_CACHE_TTL_SECONDS', '300'))
 _raw_plu_budget_path = os.environ.get('PLU_BUDGETS_PATH', '').strip()
 _default_plu_budget_path = (ROOT_DIR / "plu_budgets.json")
 if _raw_plu_budget_path:
@@ -498,6 +499,7 @@ EMBEDDING_STORE_LOCK = asyncio.Lock()
 BOOTSTRAP_POOL_LOCK = asyncio.Lock()
 CENTROID_RANK_JOBS: dict[str, dict] = {}
 CENTROID_RANK_CANCEL_EVENTS: dict[str, threading.Event] = {}
+RESNET_ANALYSIS_OVERVIEW_CACHE: dict[str, dict] = {}
 
 # Pydantic Models
 class PLUProduct(BaseModel):
@@ -3046,22 +3048,20 @@ async def get_validation_results(limit: int = 50, skip: int = 0):
         limit = 1
     if skip < 0:
         skip = 0
-    cursor = db.validation_results.find({}, {"_id": 0}).sort("timestamp", -1)
+    cursor = db.validation_results.find(
+        {},
+        {
+            "_id": 0,
+            "image_base64": 0,
+            "processed_image_base64": 0,
+        },
+    ).sort("timestamp", -1)
     if skip:
         cursor = cursor.skip(skip)
     results = await cursor.to_list(limit)
     for result in results:
         if isinstance(result['timestamp'], str):
             result['timestamp'] = datetime.fromisoformat(result['timestamp'])
-        # Don't send full base64 in list view
-        if 'image_base64' in result:
-            result['has_image'] = True
-            del result['image_base64']
-        if 'processed_image_base64' in result:
-            result['has_processed_image'] = bool(result.get('processed_image_base64'))
-            del result['processed_image_base64']
-        if 'has_processed_image' not in result:
-            result['has_processed_image'] = False
         # Ensure AI metadata exists
         if 'ai_provider' not in result:
             result['ai_provider'] = None
@@ -3416,11 +3416,13 @@ async def get_resnet_top5_analysis(
     sample_limit: int = 60,
     include_only_low_conf: bool = False,
     include_overview: bool = True,
+    refresh: bool = False,
 ):
     threshold = max(0.0, min(float(low_conf_threshold_pct), 100.0))
     sample_limit = max(1, min(int(sample_limit), max(1, RESNET_ANALYSIS_MAX_SAMPLE_LIMIT)))
     selected_code = str(plu_code or "").strip()
     base_match = {"ai_provider": "butcher_resnet"}
+    requested_include_overview = bool(include_overview)
 
     metric_projection = {
         "_id": 0,
@@ -3537,6 +3539,18 @@ async def get_resnet_top5_analysis(
 
     summary = None
     per_plu_stats: List[dict] = []
+    overview_from_cache = False
+    overview_cache_key = f"threshold={threshold:.4f}"
+
+    if include_overview and not refresh and RESNET_ANALYSIS_CACHE_TTL_SECONDS > 0:
+        cache_entry = RESNET_ANALYSIS_OVERVIEW_CACHE.get(overview_cache_key)
+        if cache_entry:
+            cache_age = time.monotonic() - float(cache_entry.get("stored_at", 0))
+            if cache_age < RESNET_ANALYSIS_CACHE_TTL_SECONDS:
+                summary = cache_entry.get("summary")
+                per_plu_stats = cache_entry.get("per_plu", [])
+                overview_from_cache = True
+                include_overview = False
 
     if include_overview:
         per_plu_pipeline = [
@@ -3618,6 +3632,12 @@ async def get_resnet_top5_analysis(
             "avg_top1_score_pct": round(top1_score_sum / top1_score_count, 2) if top1_score_count else None,
             "distinct_plu_count": len(per_plu_stats),
         }
+        if RESNET_ANALYSIS_CACHE_TTL_SECONDS > 0:
+            RESNET_ANALYSIS_OVERVIEW_CACHE[overview_cache_key] = {
+                "stored_at": time.monotonic(),
+                "summary": summary,
+                "per_plu": per_plu_stats,
+            }
 
     selected_stats = None
     samples: List[dict] = []
@@ -3720,12 +3740,16 @@ async def get_resnet_top5_analysis(
             "low_conf_threshold_pct": threshold,
             "sample_limit": sample_limit,
             "include_only_low_conf": bool(include_only_low_conf),
-            "include_overview": bool(include_overview),
+            "include_overview": requested_include_overview,
         },
         "summary": summary,
         "per_plu": per_plu_stats,
         "selected_plu": selected_stats,
         "samples": samples,
+        "cache": {
+            "overview_from_cache": overview_from_cache,
+            "overview_ttl_seconds": RESNET_ANALYSIS_CACHE_TTL_SECONDS,
+        },
     }
 
 

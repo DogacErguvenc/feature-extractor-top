@@ -51,13 +51,14 @@ const ResnetAnalysis = () => {
   const [onlyLowConf, setOnlyLowConf] = useState(false);
   const [renderedSampleCount, setRenderedSampleCount] = useState(SAMPLE_RENDER_CHUNK);
 
-  const fetchOverview = async (thresholdValue = threshold) => {
+  const fetchOverview = async (thresholdValue = threshold, refreshOverview = false) => {
     setLoadingOverview(true);
     try {
       const res = await axios.get(`${API}/stats/resnet-top5-analysis`, {
         params: {
           low_conf_threshold_pct: thresholdValue,
           sample_limit: 1,
+          refresh: refreshOverview,
         },
       });
       const payload = res.data || {};
@@ -158,7 +159,7 @@ const ResnetAnalysis = () => {
 
   const handleRefresh = async () => {
     await Promise.all([
-      fetchOverview(threshold),
+      fetchOverview(threshold, true),
       fetchSelectedPlu(selectedPlu, threshold, onlyLowConf, sampleLimit),
     ]);
   };
