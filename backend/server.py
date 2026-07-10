@@ -24,13 +24,18 @@ from openai import AsyncOpenAI
 import psutil
 import time
 import threading
+from pymongo.errors import PyMongoError
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.environ.get('MONGO_SERVER_SELECTION_TIMEOUT_MS', '3000'))
+client = AsyncIOMotorClient(
+    mongo_url,
+    serverSelectionTimeoutMS=MONGO_SERVER_SELECTION_TIMEOUT_MS,
+)
 db = client[os.environ['DB_NAME']]
 
 # Get API keys
@@ -114,6 +119,23 @@ def parse_cors_origins() -> list[str]:
         origins = [o.strip() for o in raw.split(',') if o.strip()]
         return origins
     return DEFAULT_CORS
+
+
+def mongo_unavailable_exception(exc: Exception) -> HTTPException:
+    logging.error(f"MongoDB unavailable: {exc}")
+    return HTTPException(
+        status_code=503,
+        detail="MongoDB bağlantısı yok. MongoDB servisini başlatın veya MONGO_URL ayarını kontrol edin.",
+    )
+
+
+async def ensure_mongo_available() -> None:
+    try:
+        await db.command("ping")
+    except PyMongoError as exc:
+        raise mongo_unavailable_exception(exc) from exc
+    except Exception as exc:
+        raise mongo_unavailable_exception(exc) from exc
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -2593,6 +2615,8 @@ async def batch_validate(
     foldering_enabled: bool = Form(False),
 ):
     """Validate a batch of uploaded photos against expected PLU codes."""
+    await ensure_mongo_available()
+
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
     try:
@@ -2633,7 +2657,10 @@ async def batch_validate(
             error_count += 1
             continue
 
-        plu_product = await db.plu_products.find_one({"plu_code": expected_plu}, {"_id": 0})
+        try:
+            plu_product = await db.plu_products.find_one({"plu_code": expected_plu}, {"_id": 0})
+        except PyMongoError as exc:
+            raise mongo_unavailable_exception(exc) from exc
         if not plu_product:
             results.append({
                 "filename": filename,
@@ -2712,7 +2739,10 @@ async def batch_validate(
         )
         doc = validation.model_dump()
         doc['timestamp'] = doc['timestamp'].isoformat()
-        await db.validation_results.insert_one(doc)
+        try:
+            await db.validation_results.insert_one(doc)
+        except PyMongoError as exc:
+            raise mongo_unavailable_exception(exc) from exc
 
         if BOOTSTRAP_ENABLE and ai_result.get("embedding_vector") is not None:
             _schedule_bootstrap_update(

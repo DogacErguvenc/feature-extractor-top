@@ -373,7 +373,7 @@ const BatchProcessing = () => {
       }
     } catch (error) {
       console.error("Batch validation failed", error);
-      toast.error("Toplu kontrol başarısız");
+      toast.error(error.response?.data?.detail || "Toplu kontrol başarısız");
       setFolderingInfo(null);
       setFiles((prev) =>
         prev.map((item) => ({
