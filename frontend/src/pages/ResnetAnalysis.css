@@ -165,6 +165,22 @@
   color: #1e293b;
 }
 
+.resnet-danger-actions {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.resnet-danger-actions p {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
 .resnet-sample-list {
   display: grid;
   gap: 8px;

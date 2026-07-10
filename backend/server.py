@@ -3554,6 +3554,35 @@ async def start_resnet_top5_rebuild():
     return RESNET_ANALYSIS_REBUILD_JOB
 
 
+@api_router.delete("/stats/resnet-top5-analysis/plu/{plu_code}/records")
+async def delete_resnet_top5_records_for_plu(plu_code: str):
+    selected_code = str(plu_code or "").strip()
+    if not selected_code:
+        raise HTTPException(status_code=400, detail="PLU code is required")
+    if RESNET_ANALYSIS_REBUILD_JOB.get("status") in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Analiz indeksi oluşturulurken kayıt silinemez. İş bitince tekrar deneyin.",
+        )
+
+    query = {
+        "ai_provider": "butcher_resnet",
+        "plu_code": selected_code,
+    }
+    try:
+        validation_result = await db.validation_results.delete_many(query)
+        analysis_result = await db.resnet_analysis_records.delete_many(query)
+    except PyMongoError as exc:
+        raise mongo_unavailable_exception(exc) from exc
+
+    RESNET_ANALYSIS_OVERVIEW_CACHE.clear()
+    return {
+        "plu_code": selected_code,
+        "deleted_validation_count": int(validation_result.deleted_count),
+        "deleted_analysis_count": int(analysis_result.deleted_count),
+    }
+
+
 @api_router.get("/stats/resnet-top5-analysis")
 async def get_resnet_top5_analysis(
     plu_code: Optional[str] = None,

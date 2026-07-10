@@ -52,6 +52,7 @@ const ResnetAnalysis = () => {
   const [renderedSampleCount, setRenderedSampleCount] = useState(SAMPLE_RENDER_CHUNK);
   const [analysisNeedsRebuild, setAnalysisNeedsRebuild] = useState(false);
   const [rebuildStatus, setRebuildStatus] = useState(null);
+  const [deletingPluRecords, setDeletingPluRecords] = useState(false);
 
   const fetchOverview = async (thresholdValue = threshold, refreshOverview = false) => {
     setLoadingOverview(true);
@@ -215,6 +216,42 @@ const ResnetAnalysis = () => {
 
   const loading = loadingOverview || loadingDetails;
   const rebuildRunning = ["queued", "running"].includes(rebuildStatus?.status);
+
+  const deleteSelectedPluRecords = async () => {
+    if (!selectedPlu) {
+      toast.error("Önce PLU seçin");
+      return;
+    }
+
+    const total = selectedStats?.total ?? 0;
+    const confirmed = window.confirm(
+      `${selectedPlu} PLU'suna ait ${total} ResNet analiz kaydı silinecek.\n\n` +
+      "Bu işlem PLU tanımını, eğitim fotoğraflarını veya model dosyalarını silmez; sadece bu ekrandaki ResNet kayıtlarını ve ilgili validation kayıtlarını siler.\n\n" +
+      "Devam edilsin mi?"
+    );
+    if (!confirmed) return;
+
+    setDeletingPluRecords(true);
+    try {
+      const res = await axios.delete(
+        `${API}/stats/resnet-top5-analysis/plu/${encodeURIComponent(selectedPlu)}/records`
+      );
+      const deletedValidation = res.data?.deleted_validation_count ?? 0;
+      const deletedAnalysis = res.data?.deleted_analysis_count ?? 0;
+      toast.success(`${selectedPlu} için kayıtlar silindi (${deletedValidation} validation, ${deletedAnalysis} analiz)`);
+
+      const remainingRows = perPlu.filter((row) => row.plu_code !== selectedPlu);
+      setSelectedPlu(remainingRows[0]?.plu_code || "");
+      setSelectedStats(null);
+      setSamples([]);
+      await fetchOverview(threshold, true);
+    } catch (error) {
+      console.error("resnet plu records delete error", error);
+      toast.error(error.response?.data?.detail || "PLU kayıtları silinemedi");
+    } finally {
+      setDeletingPluRecords(false);
+    }
+  };
 
   return (
     <div className="page-container resnet-analysis-page" data-testid="resnet-analysis-page">
@@ -416,6 +453,20 @@ const ResnetAnalysis = () => {
                     <p className="k">Ort. Secili PLU Skoru</p>
                     <p className="v">{formatScore(selectedStats.avg_selected_score_pct)}</p>
                   </div>
+                </div>
+              )}
+              {selectedPlu && (
+                <div className="resnet-danger-actions">
+                  <Button
+                    variant="destructive"
+                    onClick={deleteSelectedPluRecords}
+                    disabled={loading || deletingPluRecords || rebuildRunning}
+                  >
+                    {deletingPluRecords ? "Siliniyor..." : "Bu PLU Kayıtlarını Sil"}
+                  </Button>
+                  <p>
+                    Sadece bu PLU'ya ait ResNet analiz/validation kayıtları silinir; PLU, eğitim verisi ve model silinmez.
+                  </p>
                 </div>
               )}
             </CardContent>
