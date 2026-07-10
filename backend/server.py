@@ -993,13 +993,32 @@ def _ensure_top_matches(raw_value, top_k: int = 5) -> List[dict]:
     return top
 
 
+def _compact_resnet_top_matches(top_matches: List[dict]) -> Tuple[List[str], List[dict]]:
+    top5_codes: List[str] = []
+    compact_matches: List[dict] = []
+    for index, item in enumerate(top_matches, start=1):
+        code = str(item.get("plu_code") or "").strip()
+        if not code:
+            continue
+
+        try:
+            rank = int(item.get("rank") or index)
+        except (TypeError, ValueError):
+            rank = index
+
+        score_pct = _to_score_pct(item)
+        top5_codes.append(code)
+        compact_matches.append({
+            "rank": rank,
+            "plu_code": code,
+            "score_pct": round(score_pct, 2) if score_pct is not None else None,
+        })
+    return top5_codes, compact_matches
+
+
 def _extract_resnet_metrics_for_plu(doc: dict, selected_plu: str, low_conf_threshold_pct: float) -> dict:
     top_matches = _ensure_top_matches(doc.get("top_matches"), top_k=5)
-    top5_codes: List[str] = []
-    for item in top_matches:
-        code = str(item.get("plu_code") or "").strip()
-        if code:
-            top5_codes.append(code)
+    top5_codes, top5_matches = _compact_resnet_top_matches(top_matches)
 
     top1_code = top5_codes[0] if top5_codes else ""
     top1_score_pct = _to_score_pct(top_matches[0]) if top_matches else None
@@ -1029,6 +1048,7 @@ def _extract_resnet_metrics_for_plu(doc: dict, selected_plu: str, low_conf_thres
         "filename": filename,
         "predicted_plu": predicted_plu,
         "top5_codes": top5_codes,
+        "top5_matches": top5_matches,
         "top1_score_pct": round(top1_score_pct, 2) if top1_score_pct is not None else None,
         "selected_score_pct": round(selected_score_pct, 2) if selected_score_pct is not None else None,
         "is_top5_match": is_top5_match,
@@ -1047,11 +1067,7 @@ def _build_resnet_analysis_record(doc: dict) -> Optional[dict]:
         return None
 
     top_matches = _ensure_top_matches(doc.get("top_matches"), top_k=5)
-    top5_codes: List[str] = []
-    for item in top_matches:
-        code = str(item.get("plu_code") or "").strip()
-        if code:
-            top5_codes.append(code)
+    top5_codes, top5_matches = _compact_resnet_top_matches(top_matches)
 
     top1_code = top5_codes[0] if top5_codes else ""
     top1_score_pct = _to_score_pct(top_matches[0]) if top_matches else None
@@ -1073,6 +1089,7 @@ def _build_resnet_analysis_record(doc: dict) -> Optional[dict]:
         "filename": filename,
         "predicted_plu": predicted_plu,
         "top5_codes": top5_codes,
+        "top5_matches": top5_matches,
         "top1_score_pct": round(top1_score_pct, 2) if top1_score_pct is not None else None,
         "selected_score_pct": round(selected_score_pct, 2) if selected_score_pct is not None else None,
         "is_top5_match": selected_plu in top5_codes,
@@ -3886,6 +3903,7 @@ async def get_resnet_top5_analysis(
             "filename": 1,
             "predicted_plu": 1,
             "top5_codes": 1,
+            "top5_matches": 1,
             "top1_score_pct": {"$round": ["$top1_score_pct", 2]},
             "selected_score_pct": {"$round": ["$selected_score_pct", 2]},
             "is_top5_match": 1,
@@ -3926,7 +3944,11 @@ async def get_resnet_top5_analysis(
 
     analysis_record_count = await db.resnet_analysis_records.count_documents(base_match)
     validation_record_count = await db.validation_results.count_documents(base_match)
-    needs_rebuild = validation_record_count > analysis_record_count
+    missing_top5_match_score_count = await db.resnet_analysis_records.count_documents({
+        **base_match,
+        "top5_matches": {"$exists": False},
+    })
+    needs_rebuild = validation_record_count > analysis_record_count or missing_top5_match_score_count > 0
 
     return {
         "query": {
@@ -3946,6 +3968,7 @@ async def get_resnet_top5_analysis(
             "needs_rebuild": needs_rebuild,
             "analysis_record_count": analysis_record_count,
             "validation_record_count": validation_record_count,
+            "missing_top5_match_score_count": missing_top5_match_score_count,
         },
         "rebuild_job": RESNET_ANALYSIS_REBUILD_JOB,
     }

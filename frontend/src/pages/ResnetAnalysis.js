@@ -18,6 +18,52 @@ const formatScore = (value) => {
   return `${num.toFixed(1)}%`;
 };
 
+const TOP_MATCH_DISPLAY_THRESHOLD = 90;
+
+const normalizeTopMatches = (matches, fallbackCodes = []) => {
+  if (Array.isArray(matches) && matches.length > 0) {
+    const normalizedMatches = matches
+      .filter((item) => item && item.plu_code)
+      .map((item, index) => ({
+        rank: Number(item.rank) || index + 1,
+        plu_code: String(item.plu_code),
+        score_pct: item.score_pct,
+      }));
+
+    if (normalizedMatches.length > 0) {
+      return normalizedMatches;
+    }
+  }
+
+  if (!Array.isArray(fallbackCodes)) return [];
+  return fallbackCodes
+    .filter(Boolean)
+    .slice(0, 5)
+    .map((code, index) => ({
+      rank: index + 1,
+      plu_code: String(code),
+      score_pct: null,
+    }));
+};
+
+const getVisibleTopMatches = (matches, fallbackCodes = []) => {
+  const normalized = normalizeTopMatches(matches, fallbackCodes).slice(0, 5);
+  const highConfidenceMatches = normalized.filter((item) => {
+    if (item.score_pct === null || item.score_pct === undefined || item.score_pct === "") {
+      return false;
+    }
+    const score = Number(item.score_pct);
+    return Number.isFinite(score) && score >= TOP_MATCH_DISPLAY_THRESHOLD;
+  });
+
+  return highConfidenceMatches.length > 0 ? highConfidenceMatches : normalized;
+};
+
+const formatTopMatches = (row) => {
+  const visibleMatches = getVisibleTopMatches(row.top5_matches, row.top5_codes);
+  return visibleMatches.map((item) => item.plu_code).join(", ") || "-";
+};
+
 const formatTimestamp = (value) => {
   if (!value) return "-";
   try {
@@ -489,7 +535,7 @@ const ResnetAnalysis = () => {
                       <div className="resnet-sample-main">
                         <p className="file">{row.filename || "-"}</p>
                         <p className="meta">{formatTimestamp(row.timestamp)}</p>
-                        <p className="meta">Top-5: {(row.top5_codes || []).join(", ") || "-"}</p>
+                        <p className="meta">Top-5: {formatTopMatches(row)}</p>
                       </div>
                       <div className="resnet-sample-stats">
                         <span className={`chip ${row.is_top5_match ? "ok" : "bad"}`}>
