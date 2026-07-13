@@ -966,6 +966,14 @@ def _to_score_pct(match: dict) -> Optional[float]:
     except (TypeError, ValueError):
         prob_val = None
 
+    if (
+        score_type == "probability_pct"
+        and score_val is not None
+        and score_val <= 0.0
+        and prob_val is not None
+        and prob_val > 0.0
+    ):
+        return prob_val * 100.0
     if score_type == "probability_pct" and score_val is not None:
         return score_val
     if prob_val is not None:
@@ -1124,7 +1132,12 @@ async def _insert_validation_result(doc: dict) -> None:
 
 async def _enrich_resnet_sample_names(samples: List[dict]) -> None:
     codes: set[str] = set()
+    validation_ids: set[str] = set()
     for sample in samples:
+        validation_id = str(sample.get("validation_id") or "").strip()
+        if validation_id:
+            validation_ids.add(validation_id)
+
         top_matches = sample.get("top5_matches")
         if isinstance(top_matches, list):
             for item in top_matches:
@@ -1154,6 +1167,25 @@ async def _enrich_resnet_sample_names(samples: List[dict]) -> None:
         if str(doc.get("plu_code") or "").strip()
     }
 
+    raw_matches_by_validation_id: dict[str, list[dict]] = {}
+    if validation_ids:
+        raw_docs = await db.validation_results.find(
+            {
+                "id": {"$in": sorted(validation_ids)},
+                "ai_provider": "butcher_resnet",
+            },
+            {"_id": 0, "id": 1, "top_matches": 1},
+        ).to_list(len(validation_ids))
+        for doc in raw_docs:
+            validation_id = str(doc.get("id") or "").strip()
+            if not validation_id:
+                continue
+            _codes, compact_matches = _compact_resnet_top_matches(
+                _ensure_top_matches(doc.get("top_matches"), top_k=5)
+            )
+            if compact_matches:
+                raw_matches_by_validation_id[validation_id] = compact_matches
+
     for sample in samples:
         top_matches = sample.get("top5_matches")
         if not isinstance(top_matches, list) or not top_matches:
@@ -1166,6 +1198,13 @@ async def _enrich_resnet_sample_names(samples: List[dict]) -> None:
                 if str(code or "").strip()
             ]
 
+        raw_matches = raw_matches_by_validation_id.get(str(sample.get("validation_id") or "").strip()) or []
+        raw_match_by_code = {
+            str(item.get("plu_code") or "").strip(): item
+            for item in raw_matches
+            if str(item.get("plu_code") or "").strip()
+        }
+
         enriched_matches: List[dict] = []
         for index, item in enumerate(top_matches[:5], start=1):
             if not isinstance(item, dict):
@@ -1173,13 +1212,18 @@ async def _enrich_resnet_sample_names(samples: List[dict]) -> None:
             code = str(item.get("plu_code") or "").strip()
             if not code:
                 continue
+            raw_item = raw_match_by_code.get(code) or {}
             name = (
                 name_map.get(code)
                 or str(item.get("plu_name") or item.get("product_name") or item.get("name") or "").strip()
+                or str(raw_item.get("plu_name") or raw_item.get("product_name") or raw_item.get("name") or "").strip()
                 or code
             )
             enriched_item = dict(item)
-            enriched_item["rank"] = enriched_item.get("rank") or index
+            raw_score_pct = raw_item.get("score_pct")
+            if raw_score_pct is not None:
+                enriched_item["score_pct"] = raw_score_pct
+            enriched_item["rank"] = enriched_item.get("rank") or raw_item.get("rank") or index
             enriched_item["plu_name"] = name
             enriched_matches.append(enriched_item)
         sample["top5_matches"] = enriched_matches
