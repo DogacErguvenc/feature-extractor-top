@@ -96,7 +96,8 @@ API_KEY=YOUR_API_KEY
 ALLOWED_IMAGE_DIR=backend\incoming
 DISABLE_DOCS=true
 CORS_ORIGINS=http://localhost:3000
-EMERGENT_LLM_KEY=sk-emergent-dA27d5558D2C1B7C71
+# Gerçek anahtarınızı yalnız yerel .env dosyanızda saklayın; Git'e eklemeyin.
+EMERGENT_LLM_KEY=YOUR_EMERGENT_LLM_KEY
 ```
 
 ### Frontend .env Dosyası
